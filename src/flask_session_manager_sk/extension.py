@@ -14,13 +14,14 @@ class SessionManagerCallbacks:
         refresh_user_token — create and return a new JWT for a user (or None)
 
     Optional:
-        verify_user_token  — validate a known token for a user (return record or None)
+        verify_user_token  — validate a token claim for a user (return record or None).
+                             Called as fn(user, agent, device_uid, token).
         is_user_active     — check whether a user object is active (return bool)
     """
 
     user_lookup: Callable[[str], Any | None]
     refresh_user_token: Callable[[Any, str, str | None], str | None]
-    verify_user_token: Callable[[Any, str | None, str | None], Any | None] | None = None
+    verify_user_token: Callable[[Any, str | None, str | None, str | None], Any | None] | None = None
     is_user_active: Callable[[Any], bool] | None = None
 
 
