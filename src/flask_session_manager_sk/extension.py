@@ -21,7 +21,9 @@ class SessionManagerCallbacks:
 
     user_lookup: Callable[[str], Any | None]
     refresh_user_token: Callable[[Any, str, str | None], str | None]
-    verify_user_token: Callable[[Any, str | None, str | None, str | None], Any | None] | None = None
+    verify_user_token: (
+        Callable[[Any, str | None, str | None, str | None], Any | None] | None
+    ) = None
     is_user_active: Callable[[Any], bool] | None = None
 
 
