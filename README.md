@@ -1,6 +1,6 @@
 # flask-session.manager.sk
 
-[![PyPI version](https://img.shields.io/pypi/v/flask-session.manager.sk)](https://pypi.org/project/flask-session.manager.sk/)
+[![Version](https://img.shields.io/github/v/tag/Skulldorom/flask-session.manager.sk)](https://github.com/Skulldorom/flask-session.manager.sk/tags)
 [![Python](https://img.shields.io/pypi/pyversions/flask-session.manager.sk)](https://pypi.org/project/flask-session.manager.sk/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 
