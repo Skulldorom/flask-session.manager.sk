@@ -97,6 +97,8 @@ jobs:
       - run: uv build
 
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
 
       - name: Commit version bump and tag
         if: github.event_name != 'push'
@@ -108,4 +110,5 @@ jobs:
           git add pyproject.toml uv.lock
           git commit -m "chore: bump version to ${NEW_VERSION}"
           git tag "v${NEW_VERSION}"
-          git push origin HEAD:main --follow-tags
+          git push origin HEAD:main
+          git push origin "v${NEW_VERSION}"
