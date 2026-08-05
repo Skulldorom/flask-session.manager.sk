@@ -1,5 +1,9 @@
 # flask-session.manager.sk
 
+[![PyPI version](https://img.shields.io/pypi/v/flask-session.manager.sk)](https://pypi.org/project/flask-session.manager.sk/)
+[![Python](https://img.shields.io/pypi/pyversions/flask-session.manager.sk)](https://pypi.org/project/flask-session.manager.sk/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
+
 Flask companion package for
 [react-session.manager.sk](https://github.com/Skulldorom/react-session.manager.sk).
 
@@ -9,6 +13,10 @@ React session manager's HttpOnly-cookie transport.
 ## Install
 
 ```bash
+# uv (recommended)
+uv add flask-session.manager.sk
+
+# pip
 pip install flask-session.manager.sk
 ```
 
@@ -58,7 +66,7 @@ def whoami():
     return jsonify(logged_in=False)
 ```
 
-## Public API (v0.1)
+## Public API
 
 Only four names are part of the stable surface:
 
@@ -70,6 +78,12 @@ Only four names are part of the stable surface:
 | `clear_token_response` | Create a response that clears JWT cookies |
 
 Everything else in the package is internal and may change without notice.
+
+```python
+import flask_session_manager_sk
+
+print(flask_session_manager_sk.__version__)  # e.g. "1.0.0"
+```
 
 ### SessionManagerCallbacks
 
@@ -144,6 +158,24 @@ If your backend currently returns access tokens as JSON payloads (e.g.
 5. **Backwards compatibility**: Non-browser clients (API scripts, scheduled
    tasks) can still send `Authorization: Bearer <token>`. The CSRF check
    skips bearer-authenticated requests.
+
+## Development
+
+```bash
+git clone https://github.com/Skulldorom/flask-session.manager.sk.git
+cd flask-session.manager.sk
+
+# Install deps + editable package
+uv sync --dev
+
+# Run checks
+uv run ruff check .
+uv run ruff format --check .
+uv run pytest -v
+
+# Build
+uv build
+```
 
 ## License
 
