@@ -1,6 +1,6 @@
 [project]
 name = "flask-session.manager.sk"
-version = "0.1.4"
+version = "1.0.0"
 description = "Flask companion package for react-session.manager.sk"
 readme = "README.md"
 requires-python = ">=3.11"
