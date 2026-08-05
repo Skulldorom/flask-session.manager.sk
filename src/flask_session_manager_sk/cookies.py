@@ -1,7 +1,5 @@
 """Cookie and CSRF helpers for Flask JWT session management."""
 
-import hashlib
-from datetime import UTC, datetime
 from urllib.parse import urlparse
 
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
@@ -103,7 +101,6 @@ def clear_token_response(payload=None, status=200):
 
 def clear_session_token_value(token_record):
     """Invalidate a session token while preserving its registered-device row."""
-    token_record.token_hash = hashlib.sha256(b"").hexdigest()
-    token_record.hint = ""
-    token_record.token = None
-    token_record.last_modified = datetime.now(UTC)
+    from .tokens import clear_session_token_value as _impl
+
+    _impl(token_record)

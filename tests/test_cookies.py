@@ -199,6 +199,21 @@ def test_bearer_auth_bypasses_csrf_check():
     assert result is None
 
 
+def test_cookie_auth_post_allows_configured_referer():
+    """CSRF check passes when Referer (not Origin) matches a configured origin."""
+    app = make_app()
+    with app.test_request_context(
+        "/",
+        method="POST",
+        headers={
+            "Cookie": "access_token=abc",
+            "Referer": "https://example.com/page",
+        },
+    ):
+        result = reject_cookie_csrf()
+    assert result is None
+
+
 # ---------------------------------------------------------------------------
 # clear_session_token_value
 # ---------------------------------------------------------------------------

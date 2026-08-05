@@ -225,3 +225,14 @@ def test_no_verify_token_callback():
         },
     )
     assert resp.status_code == 200
+
+
+def test_jwt_required_rejects_unauthenticated():
+    """A @jwt_required (non-optional) route returns 4xx without a token."""
+    app, _, _ = _build_app_and_token()
+    client = app.test_client()
+
+    resp = client.get("/protected")
+    assert resp.status_code in (401, 422)
+    data = resp.get_json()
+    assert data is not None
