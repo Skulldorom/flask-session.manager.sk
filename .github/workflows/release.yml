@@ -1,6 +1,10 @@
 name: Release
 
 on:
+  workflow_run:
+    workflows: [CI]
+    branches: [main]
+    types: [completed]
   workflow_dispatch:
     inputs:
       version_part:
@@ -20,56 +24,82 @@ permissions:
   contents: write
   id-token: write
 
-jobs:
-  ci:
-    uses: ./.github/workflows/ci.yml
+concurrency:
+  group: release-${{ github.event.workflow_run.head_branch || github.ref }}
+  cancel-in-progress: false
 
+jobs:
   publish:
-    needs: ci
+    name: Publish
     runs-on: ubuntu-latest
     if: >-
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main') ||
       github.event_name == 'workflow_dispatch' ||
       startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          token: ${{ secrets.GITHUB_TOKEN }}
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
 
-      - name: Bump version (dispatch only)
-        if: github.event_name == 'workflow_dispatch'
+      - name: Bump version
         id: bump
         run: |
           python - <<'PY'
           import re, os
           from pathlib import Path
+
           pyproject = Path("pyproject.toml")
           text = pyproject.read_text()
           match = re.search(r'(?m)^version = "(\d+)\.(\d+)\.(\d+)"$', text)
           major, minor, patch = map(int, match.groups())
+
+          # workflow_dispatch: user-chosen part
+          # workflow_run (auto): always patch
+          # tag push: no bump
           part = os.environ.get("VERSION_PART", "patch")
-          if part == "major": major += 1; minor = 0; patch = 0
-          elif part == "minor": minor += 1; patch = 0
-          else: patch += 1
+
+          if part == "major":
+              major += 1
+              minor = 0
+              patch = 0
+          elif part == "minor":
+              minor += 1
+              patch = 0
+          else:
+              patch += 1
+
           new = f"{major}.{minor}.{patch}"
-          text = text[:match.start(1)] + new + text[match.end(3):]
+          text = text[: match.start(1)] + new + text[match.end(3) :]
           pyproject.write_text(text)
-          print(f"new_version={new}")
+
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write(f"new_version={new}\n")
           PY
         env:
-          VERSION_PART: ${{ github.event.inputs.version_part }}
+          VERSION_PART: >-
+            ${{
+              github.event_name == 'workflow_dispatch'
+              && github.event.inputs.version_part
+              || 'patch'
+            }}
 
-      - run: uv lock
+      - name: Rebuild lockfile
+        if: github.event_name != 'push'
+        run: uv lock
+
       - run: uv build
 
       - uses: pypa/gh-action-pypi-publish@release/v1
 
-      - name: Commit version bump and tag (dispatch only)
-        if: github.event_name == 'workflow_dispatch'
+      - name: Commit version bump and tag
+        if: github.event_name != 'push'
         env:
           NEW_VERSION: ${{ steps.bump.outputs.new_version }}
         run: |
