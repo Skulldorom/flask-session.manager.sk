@@ -112,3 +112,13 @@ jobs:
           git tag "v${NEW_VERSION}"
           git push origin HEAD:main
           git push origin "v${NEW_VERSION}"
+
+      - name: Create GitHub release
+        if: github.event_name != 'push' && steps.bump.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_VERSION: ${{ steps.bump.outputs.new_version }}
+        run: |
+          gh release create "v${NEW_VERSION}" \
+            --title "v${NEW_VERSION}" \
+            --generate-notes
