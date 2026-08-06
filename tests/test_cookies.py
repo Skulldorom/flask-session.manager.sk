@@ -68,6 +68,117 @@ def test_token_response_without_token_sets_no_cookie():
     assert cookie_value is None
 
 
+def test_token_response_session_cookie_by_default():
+    """persistent=False (default) → no Max-Age on Set-Cookie."""
+    from datetime import timedelta
+
+    app = make_app({"FSM_PERSISTENT_MAX_AGE": timedelta(days=30)})
+    with app.app_context():
+        from flask_jwt_extended import create_access_token
+
+        token = create_access_token(identity="1")
+        response, status = token_response(
+            {"status": "success", "access_token": token}, 200, token
+        )
+
+    assert status == 200
+    cookie_str = "; ".join(response.headers.getlist("Set-Cookie"))
+    assert "access_token=" in cookie_str
+    assert "Max-Age=" not in cookie_str
+
+
+def test_token_response_persistent_adds_max_age():
+    """persistent=True → Max-Age on all Set-Cookie headers."""
+    from datetime import timedelta
+
+    app = make_app({"FSM_PERSISTENT_MAX_AGE": timedelta(days=30)})
+    with app.app_context():
+        from flask_jwt_extended import create_access_token
+
+        token = create_access_token(identity="1")
+        response, status = token_response(
+            {"status": "success", "access_token": token},
+            200,
+            token,
+            persistent=True,
+        )
+
+    assert status == 200
+    cookie_str = "; ".join(response.headers.getlist("Set-Cookie"))
+    assert "access_token=" in cookie_str
+    assert "Max-Age=2592000" in cookie_str
+
+
+def test_token_response_persistent_accepts_timedelta_config():
+    """FSM_PERSISTENT_MAX_AGE can be a timedelta, converted to int seconds."""
+    from datetime import timedelta
+
+    app = make_app({"FSM_PERSISTENT_MAX_AGE": timedelta(days=7)})
+    with app.app_context():
+        from flask_jwt_extended import create_access_token
+
+        token = create_access_token(identity="1")
+        response, status = token_response(
+            {"status": "ok"}, 200, token, persistent=True
+        )
+
+    cookie_str = "; ".join(response.headers.getlist("Set-Cookie"))
+    assert "Max-Age=604800" in cookie_str  # 7 days in seconds
+
+
+def test_token_response_persistent_requires_config():
+    """persistent=True with no FSM_PERSISTENT_MAX_AGE raises RuntimeError."""
+    app = make_app()  # no FSM_PERSISTENT_MAX_AGE
+    with app.app_context():
+        from flask_jwt_extended import create_access_token
+
+        token = create_access_token(identity="1")
+        import pytest as pytest_mod
+
+        with pytest_mod.raises(RuntimeError, match="FSM_PERSISTENT_MAX_AGE"):
+            token_response({"status": "ok"}, 200, token, persistent=True)
+
+
+def test_token_response_persistent_no_token_no_cookie_manipulation():
+    """Without an access_token, persistent flag is ignored — no cookie at all."""
+    from datetime import timedelta
+
+    app = make_app({"FSM_PERSISTENT_MAX_AGE": timedelta(days=30)})
+    with app.app_context():
+        response, status = token_response({"status": "ok"}, 200, persistent=True)
+
+    assert status == 200
+    assert response.headers.get("Set-Cookie") is None
+
+
+def test_token_response_persistent_sets_max_age_on_all_cookies():
+    """persistent=True appends Max-Age to EVERY Set-Cookie header from
+    flask-jwt-extended — access-token, CSRF, and any future additions."""
+    from datetime import timedelta
+
+    app = make_app(
+        {
+            "FSM_PERSISTENT_MAX_AGE": timedelta(days=30),
+            "JWT_COOKIE_CSRF_PROTECT": True,
+        }
+    )
+    with app.app_context():
+        from flask_jwt_extended import create_access_token
+
+        token = create_access_token(identity="1")
+        response, status = token_response(
+            {"status": "ok"}, 200, token, persistent=True
+        )
+
+    cookies = response.headers.getlist("Set-Cookie")
+    # At least 2 cookies: access token + CSRF
+    assert len(cookies) >= 2
+    for cookie in cookies:
+        assert "Max-Age=2592000" in cookie, (
+            f"Every Set-Cookie header must have Max-Age; missing in: {cookie}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # clear_token_response
 # ---------------------------------------------------------------------------
