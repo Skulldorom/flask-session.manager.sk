@@ -3,7 +3,6 @@ name: Release
 on:
   workflow_run:
     workflows: [CI]
-    branches: [main]
     types: [completed]
   workflow_dispatch:
     inputs:
@@ -18,107 +17,230 @@ on:
           - patch
   push:
     tags:
-      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v*.*.*"
 
 permissions:
   contents: write
+  pull-requests: read
   id-token: write
 
 concurrency:
   group: release-${{ github.event.workflow_run.head_branch || github.ref }}
   cancel-in-progress: false
 
+env:
+  DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+  LABEL_MAJOR: version:major
+  LABEL_MINOR: version:minor
+
 jobs:
+  # ── Manual dispatch: run CI first ──────────────────────────
+  #
+  # NOTE: When this job is skipped (workflow_run trigger),
+  # `needs.test.result` resolves to 'skipped'. The publish
+  # job gates on 'success' or 'skipped'. Validate this
+  # behavior in a small prototype if GitHub Actions version
+  # is uncertain — the alternative is two separate publish
+  # job definitions (one per trigger), at the cost of
+  # duplicating the job body.
+  test:
+    name: Run CI
+    if: github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/ci.yml
+
+  # ═══════════════════════════════════════════════════════════════
+  # Auto-version (workflow_run) + Manual dispatch (workflow_dispatch)
+  # ═══════════════════════════════════════════════════════════════
   publish:
     name: Publish
     runs-on: ubuntu-latest
-    if: >-
-      (github.event_name == 'workflow_run' &&
-       github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.head_branch == 'main') ||
-      github.event_name == 'workflow_dispatch' ||
-      startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    if: |
+      always() &&
+      (needs.test.result == 'success' || needs.test.result == 'skipped') &&
+      (
+        (github.event_name == 'workflow_run' &&
+         github.event.workflow_run.conclusion == 'success' &&
+         github.event.workflow_run.head_branch == env.DEFAULT_BRANCH) ||
+        github.event_name == 'workflow_dispatch'
+      )
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           token: ${{ secrets.GITHUB_TOKEN }}
+
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
 
+      # ── Determine version part ──────────────────────────────
+      - name: Determine version part
+        id: version_part
+        run: |
+          # Skip if the checked-out commit is a version bump
+          if git log -1 --pretty=%B | grep -q "\[skip-version\]"; then
+            echo "HEAD commit is a version bump ([skip-version] found) — skipping"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            PART="${{ github.event.inputs.version_part }}"
+          else
+            # workflow_run: query PR labels
+            HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
+            LABELS=$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/pulls" \
+              | jq --arg branch "$DEFAULT_BRANCH" -r \
+                '.[] | select(.base.ref == $branch and .merged_at != null) | .labels[].name' \
+              2>/dev/null || echo "")
+
+            if [ -z "$LABELS" ]; then
+              echo "No merged PR targeting $DEFAULT_BRANCH found for $HEAD_SHA — defaulting to patch"
+              PART="patch"
+            elif echo "$LABELS" | grep -qx "$LABEL_MAJOR"; then
+              echo "Found $LABEL_MAJOR label — bumping major"
+              PART="major"
+            elif echo "$LABELS" | grep -qx "$LABEL_MINOR"; then
+              echo "Found $LABEL_MINOR label — bumping minor"
+              PART="minor"
+            else
+              echo "Merged PR found but no $LABEL_MAJOR/$LABEL_MINOR label — defaulting to patch"
+              PART="patch"
+            fi
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "part=$PART" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Sync to latest default branch (deterministic) ───────
+      - name: Sync to latest default branch
+        if: steps.version_part.outputs.skip != 'true'
+        run: |
+          git fetch origin "$DEFAULT_BRANCH"
+          git reset --hard "origin/$DEFAULT_BRANCH"
+
+      # ── Bump version ────────────────────────────────────────
       - name: Bump version
         id: bump
+        if: steps.version_part.outputs.skip != 'true'
         run: |
           python - <<'PY'
-          import re, os
+          import re, os, sys
           from pathlib import Path
 
           pyproject = Path("pyproject.toml")
           text = pyproject.read_text()
           match = re.search(r'(?m)^version = "(\d+)\.(\d+)\.(\d+)"$', text)
-          major, minor, patch = map(int, match.groups())
 
-          # workflow_dispatch: user-chosen part
-          # workflow_run (auto): always patch
-          # tag push: no bump
-          part = os.environ.get("VERSION_PART", "patch")
+          if not match:
+              print("ERROR: Could not find version = \"X.Y.Z\" in pyproject.toml", file=sys.stderr)
+              sys.exit(1)
+
+          major, minor, patch = map(int, match.groups())
+          part = os.environ["VERSION_PART"]
 
           if part == "major":
-              major += 1
-              minor = 0
-              patch = 0
+              major += 1; minor = 0; patch = 0
           elif part == "minor":
-              minor += 1
-              patch = 0
+              minor += 1; patch = 0
           else:
               patch += 1
 
           new = f"{major}.{minor}.{patch}"
-          text = text[: match.start(1)] + new + text[match.end(3) :]
+          text = text[:match.start(1)] + new + text[match.end(3):]
           pyproject.write_text(text)
 
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write(f"new_version={new}\n")
           PY
         env:
-          VERSION_PART: >-
-            ${{
-              github.event_name == 'workflow_dispatch'
-              && github.event.inputs.version_part
-              || 'patch'
-            }}
+          VERSION_PART: ${{ steps.version_part.outputs.part }}
 
       - name: Rebuild lockfile
-        if: github.event_name != 'push'
+        if: steps.version_part.outputs.skip != 'true'
         run: uv lock
 
-      - run: uv build
-
-      - uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          skip-existing: true
-
+      # ── Commit + tag + push (before build/publish) ─────────
       - name: Commit version bump and tag
-        if: github.event_name != 'push'
+        id: commit
+        if: steps.version_part.outputs.skip != 'true'
         env:
           NEW_VERSION: ${{ steps.bump.outputs.new_version }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add pyproject.toml uv.lock
-          git commit -m "chore: bump version to ${NEW_VERSION}"
-          git tag "v${NEW_VERSION}"
-          git push origin HEAD:main
-          git push origin "v${NEW_VERSION}"
+          git commit -m "chore: bump version to ${NEW_VERSION}
 
+          [skip-version]"
+          git tag "v${NEW_VERSION}"
+          git push origin "HEAD:$DEFAULT_BRANCH" --follow-tags
+
+      # ── Build + publish ─────────────────────────────────────
+      - run: uv build
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
+
+      # ── GitHub Release ─────────────────────────────────────
       - name: Create GitHub release
-        if: github.event_name != 'push' && steps.bump.outcome == 'success'
+        if: steps.commit.outcome == 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NEW_VERSION: ${{ steps.bump.outputs.new_version }}
         run: |
           gh release create "v${NEW_VERSION}" \
             --title "v${NEW_VERSION}" \
+            --generate-notes
+
+  # ═══════════════════════════════════════════════════════════════
+  # Tag push: idempotent — skips if release already exists
+  # ═══════════════════════════════════════════════════════════════
+  publish-existing-tag:
+    name: Publish existing tag
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref }}
+
+      - name: Check if release already exists
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "${{ github.ref_name }}" &>/dev/null; then
+            echo "Release ${{ github.ref_name }} already exists — skipping (handled by publish job)"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No release found — will build and publish"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: astral-sh/setup-uv@v7
+        if: steps.check.outputs.skip != 'true'
+        with:
+          enable-cache: true
+
+      - if: steps.check.outputs.skip != 'true'
+        run: uv build
+
+      - if: steps.check.outputs.skip != 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
+
+      - name: Create GitHub release
+        if: steps.check.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "${{ github.ref_name }}" \
             --generate-notes
