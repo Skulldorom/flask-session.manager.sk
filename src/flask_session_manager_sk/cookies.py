@@ -78,15 +78,63 @@ def reject_cookie_csrf(req=None, app=None):
     return jsonify(status="fail", message="CSRF origin check failed"), 403
 
 
-def token_response(payload, status=200, access_token=None):
-    """Create a Flask JSON response, optionally setting an HttpOnly JWT cookie."""
-    from flask import jsonify
+def token_response(payload, status=200, access_token=None, persistent=False):
+    """Create a Flask JSON response, optionally setting an HttpOnly JWT cookie.
+
+    When persistent=True, all Set-Cookie headers receive a Max-Age so the
+    session survives browser restarts.  Default (persistent=False) leaves
+    cookies as session-only (cleared on browser exit).
+    """
+    from flask import current_app, jsonify
     from flask_jwt_extended import set_access_cookies
 
     response = jsonify(payload)
     if access_token:
         set_access_cookies(response, access_token)
+        if persistent:
+            max_age = _resolve_persistent_max_age(current_app)
+            _make_cookies_persistent(response, max_age)
     return response, status
+
+
+def _make_cookies_persistent(response, max_age_seconds):
+    """Append Max-Age to every Set-Cookie header on the response.
+
+    Uses only stable Werkzeug APIs (response.headers.getlist /
+    response.headers.setlist) with simple string concatenation —
+    no assumptions about flask-jwt-extended internals, no
+    version-dependent kwargs, no fragile header regex.
+    """
+    cookies = response.headers.getlist("Set-Cookie")
+    if not cookies:
+        return
+    persistent_cookies = [f"{cookie}; Max-Age={max_age_seconds}" for cookie in cookies]
+    response.headers.setlist("Set-Cookie", persistent_cookies)
+
+
+def _resolve_persistent_max_age(app):
+    """Return the persistent Max-Age in integer seconds.
+
+    Reads FSM_PERSISTENT_MAX_AGE from app config.  Handles both
+    timedelta and integer config values — flask-jwt-extended accepts
+    either, but Max-Age in a Set-Cookie header MUST be integer
+    seconds (RFC 6265).
+
+    Raises RuntimeError if FSM_PERSISTENT_MAX_AGE is unset and
+    persistent=True is used — there's no safe default; JWT token
+    expiry is typically 15 minutes which is not a meaningful
+    "remember me" duration.
+    """
+    from datetime import timedelta
+
+    value = app.config.get("FSM_PERSISTENT_MAX_AGE")
+    if value is None:
+        raise RuntimeError(
+            "persistent=True requires FSM_PERSISTENT_MAX_AGE to be set "
+            "in the Flask app config (e.g. app.config['FSM_PERSISTENT_MAX_AGE'] "
+            "= datetime.timedelta(days=30))."
+        )
+    return int(value.total_seconds()) if isinstance(value, timedelta) else int(value)
 
 
 def clear_token_response(payload=None, status=200):
