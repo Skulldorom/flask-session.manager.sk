@@ -180,3 +180,7 @@ uv build
 ## License
 
 MIT — see [LICENSE](./LICENSE).
+
+
+<!-- test auto-versioning pipeline -->
+
