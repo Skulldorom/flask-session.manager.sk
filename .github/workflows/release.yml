@@ -79,8 +79,8 @@ jobs:
       - name: Determine version part
         id: version_part
         run: |
-          # Skip if the checked-out commit is a version bump
-          if git log -1 --pretty=%B | grep -q "\[skip-version\]"; then
+          # On workflow_run, skip if HEAD is a version bump commit
+          if [ "${{ github.event_name }}" = "workflow_run" ] && git log -1 --pretty=%B | grep -q "\\[skip-version\\]"; then
             echo "HEAD commit is a version bump ([skip-version] found) — skipping"
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
@@ -180,15 +180,17 @@ jobs:
           git push origin "HEAD:$DEFAULT_BRANCH" --follow-tags
 
       # ── Build + publish ─────────────────────────────────────
-      - run: uv build
+      - if: steps.version_part.outputs.skip != 'true'
+        run: uv build
 
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - if: steps.version_part.outputs.skip != 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
         with:
           skip-existing: true
 
       # ── GitHub Release ─────────────────────────────────────
       - name: Create GitHub release
-        if: steps.commit.outcome == 'success'
+        if: steps.commit.outcome != 'failure'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NEW_VERSION: ${{ steps.bump.outputs.new_version }}
