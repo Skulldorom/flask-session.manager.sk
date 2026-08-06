@@ -176,6 +176,140 @@ def test_token_response_persistent_sets_max_age_on_all_cookies():
 
 
 # ---------------------------------------------------------------------------
+# Partitioned cookies (CHIPS)
+# ---------------------------------------------------------------------------
+def _partitioned_app():
+    """App with CHIPS-compatible cookie settings + FSM_COOKIE_PARTITIONED."""
+    return make_app(
+        {
+            "FSM_COOKIE_PARTITIONED": True,
+            "JWT_COOKIE_SAMESITE": "None",
+            "JWT_COOKIE_SECURE": True,
+            "JWT_COOKIE_CSRF_PROTECT": True,
+        }
+    )
+
+
+def test_token_response_partitioned_off_by_default():
+    """Default: no Partitioned attribute is appended."""
+    app = make_app({"JWT_COOKIE_SAMESITE": "None", "JWT_COOKIE_SECURE": True})
+    with app.app_context():
+        from flask_jwt_extended import create_access_token
+
+        token = create_access_token(identity="1")
+        response, status = token_response({"status": "ok"}, 200, token)
+
+    assert status == 200
+    cookie_str = "; ".join(response.headers.getlist("Set-Cookie"))
+    assert "access_token=" in cookie_str
+    assert "Partitioned" not in cookie_str
+
+
+def test_token_response_partitioned_appends_attribute():
+    """FSM_COOKIE_PARTITIONED=True appends Partitioned to every cookie."""
+    app = _partitioned_app()
+    with app.app_context():
+        from flask_jwt_extended import create_access_token
+
+        token = create_access_token(identity="1")
+        response, status = token_response({"status": "ok"}, 200, token)
+
+    assert status == 200
+    cookies = response.headers.getlist("Set-Cookie")
+    assert len(cookies) >= 2  # access token + CSRF
+    for cookie in cookies:
+        assert "Partitioned" in cookie, (
+            f"Every Set-Cookie header must have Partitioned; missing in: {cookie}"
+        )
+
+
+def test_token_response_partitioned_combines_with_persistent():
+    """persistent=True + partitioned=True → both Max-Age and Partitioned."""
+    from datetime import timedelta
+
+    app = _partitioned_app()
+    app.config["FSM_PERSISTENT_MAX_AGE"] = timedelta(days=30)
+    with app.app_context():
+        from flask_jwt_extended import create_access_token
+
+        token = create_access_token(identity="1")
+        response, status = token_response({"status": "ok"}, 200, token, persistent=True)
+
+    assert status == 200
+    cookies = response.headers.getlist("Set-Cookie")
+    assert len(cookies) >= 2
+    for cookie in cookies:
+        assert "Max-Age=2592000" in cookie
+        assert "Partitioned" in cookie
+
+
+def test_token_response_partitioned_requires_samesite_none():
+    """FSM_COOKIE_PARTITIONED=True with non-None SameSite raises RuntimeError."""
+    import pytest as pytest_mod
+
+    app = make_app(
+        {
+            "FSM_COOKIE_PARTITIONED": True,
+            "JWT_COOKIE_SAMESITE": "Lax",
+            "JWT_COOKIE_SECURE": True,
+        }
+    )
+    with app.app_context():
+        from flask_jwt_extended import create_access_token
+
+        token = create_access_token(identity="1")
+        with pytest_mod.raises(RuntimeError, match="JWT_COOKIE_SAMESITE"):
+            token_response({"status": "ok"}, 200, token)
+
+
+def test_token_response_partitioned_requires_secure():
+    """FSM_COOKIE_PARTITIONED=True without Secure raises RuntimeError."""
+    import pytest as pytest_mod
+
+    app = make_app(
+        {
+            "FSM_COOKIE_PARTITIONED": True,
+            "JWT_COOKIE_SAMESITE": "None",
+            "JWT_COOKIE_SECURE": False,
+        }
+    )
+    with app.app_context():
+        from flask_jwt_extended import create_access_token
+
+        token = create_access_token(identity="1")
+        with pytest_mod.raises(RuntimeError, match="JWT_COOKIE_SECURE"):
+            token_response({"status": "ok"}, 200, token)
+
+
+def test_clear_token_response_partitioned_appends_attribute():
+    """Clearing cookies with FSM_COOKIE_PARTITIONED must also send Partitioned
+    so the browser can match and delete the partitioned cookie."""
+    app = _partitioned_app()
+    with app.app_context():
+        response, status = clear_token_response()
+
+    assert status == 200
+    cookies = response.headers.getlist("Set-Cookie")
+    assert len(cookies) >= 2
+    for cookie in cookies:
+        assert "Partitioned" in cookie, (
+            f"Every cleared Set-Cookie must have Partitioned; missing in: {cookie}"
+        )
+
+
+def test_clear_token_response_partitioned_off_by_default():
+    """Default: clearing cookies does not append Partitioned."""
+    app = make_app()
+    with app.app_context():
+        response, status = clear_token_response()
+
+    assert status == 200
+    cookie_str = "; ".join(response.headers.getlist("Set-Cookie"))
+    assert "access_token=" in cookie_str
+    assert "Partitioned" not in cookie_str
+
+
+# ---------------------------------------------------------------------------
 # clear_token_response
 # ---------------------------------------------------------------------------
 def test_clear_token_response_expires_cookie():

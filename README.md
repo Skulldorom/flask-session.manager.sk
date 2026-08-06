@@ -111,9 +111,30 @@ stored in the package.
 | `JWT_ACCESS_COOKIE_NAME` | Yes | — | Cookie name; `react-session.manager.sk` expects `"access_token_cookie"` |
 | `JWT_COOKIE_CSRF_PROTECT` | Yes | — | Must be `True` for browser clients |
 | `JWT_COOKIE_SECURE` | Yes | — | `True` in production (HTTPS only) |
-| `JWT_COOKIE_SAMESITE` | No | — | `"Lax"` or `"Strict"` |
+| `JWT_COOKIE_SAMESITE` | No | — | `"Lax"` or `"Strict"`; use `"None"` (with `Secure=True`) for cross-site cookies | 
+| `FSM_PERSISTENT_MAX_AGE` | For `persistent=True` | — | `timedelta` or int seconds for "remember me" `Max-Age` |
+| `FSM_COOKIE_PARTITIONED` | No | `False` | Append `; Partitioned` (CHIPS) to all auth cookies. Requires `JWT_COOKIE_SAMESITE="None"` and `JWT_COOKIE_SECURE=True`. Fixes cross-site cookie auth on iOS WebKit/Safari ITP and other third-party-cookie blockers. |
 | `FRONTEND_URL` | Yes | — | Canonical URL of the SPA |
 | `CORS_ORIGINS` | Yes | — | List of allowed browser origins |
+
+## Cross-Site Cookies and iOS WebKit (CHIPS)
+
+Browser auth uses an HttpOnly cookie. When the SPA and the API live on
+different registrable domains (e.g. `app.example.com` → `api.herokuapp.com`),
+the cookie is a **third-party** cookie. Desktop Chromium accepts
+`SameSite=None; Secure` third-party cookies, but iOS WebKit (Safari and every
+iOS browser, including Brave, which is WebKit under the hood) blocks them by
+default via Intelligent Tracking Prevention. Result: login succeeds, the
+browser never stores the cookie, and the next request 401s.
+
+Set `FSM_COOKIE_PARTITIONED=True` to emit `; Partitioned` (CHIPS) on all auth
+cookies. Partitioned cookies are stored in a per-top-level-site partition, so
+WebKit keeps them even with third-party cookies blocked. Requirements:
+
+- `JWT_COOKIE_SAMESITE="None"` and `JWT_COOKIE_SECURE=True` (enforced — a
+  misconfigured combination raises `RuntimeError` at cookie-set time).
+- Browser support: iOS 16.4+ / Safari 16.4+, Chrome 114+. Older iOS remains
+  affected; the durable fix is serving the API from the same site as the SPA.
 
 ## React Companion Contract
 
