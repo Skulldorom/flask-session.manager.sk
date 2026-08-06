@@ -84,6 +84,12 @@ def token_response(payload, status=200, access_token=None, persistent=False):
     When persistent=True, all Set-Cookie headers receive a Max-Age so the
     session survives browser restarts.  Default (persistent=False) leaves
     cookies as session-only (cleared on browser exit).
+
+    When FSM_COOKIE_PARTITIONED is enabled, all Set-Cookie headers also
+    receive the ``Partitioned`` attribute (CHIPS).  Partitioned cookies are
+    stored in a per-top-level-site partition, which keeps cross-site cookie
+    auth working on browsers that block third-party cookies by default
+    (notably iOS WebKit / Safari ITP).
     """
     from flask import current_app, jsonify
     from flask_jwt_extended import set_access_cookies
@@ -94,6 +100,8 @@ def token_response(payload, status=200, access_token=None, persistent=False):
         if persistent:
             max_age = _resolve_persistent_max_age(current_app)
             _make_cookies_persistent(response, max_age)
+        if _resolve_partitioned(current_app):
+            _make_cookies_partitioned(response)
     return response, status
 
 
@@ -137,13 +145,49 @@ def _resolve_persistent_max_age(app):
     return int(value.total_seconds()) if isinstance(value, timedelta) else int(value)
 
 
+def _resolve_partitioned(app):
+    """Return whether FSM_COOKIE_PARTITIONED is enabled for the app.
+
+    CHIPS (Partitioned cookies) requires the cookie to also be
+    ``SameSite=None; Secure`` — browsers ignore the Partitioned attribute
+    otherwise.  Raise a clear error instead of silently emitting a cookie
+    that WebKit will drop, mirroring the FSM_PERSISTENT_MAX_AGE pattern.
+    """
+    if not app.config.get("FSM_COOKIE_PARTITIONED", False):
+        return False
+    samesite = app.config.get("JWT_COOKIE_SAMESITE")
+    secure = app.config.get("JWT_COOKIE_SECURE")
+    if samesite != "None" or not secure:
+        raise RuntimeError(
+            "FSM_COOKIE_PARTITIONED=True requires JWT_COOKIE_SAMESITE='None' "
+            "and JWT_COOKIE_SECURE=True (CHIPS spec); got "
+            f"samesite={samesite!r}, secure={secure!r}."
+        )
+    return True
+
+
+def _make_cookies_partitioned(response):
+    """Append the Partitioned attribute to every Set-Cookie header.
+
+    Uses the same stable Werkzeug APIs as _make_cookies_persistent — no
+    assumptions about flask-jwt-extended internals, no fragile header regex.
+    """
+    cookies = response.headers.getlist("Set-Cookie")
+    if not cookies:
+        return
+    partitioned_cookies = [f"{cookie}; Partitioned" for cookie in cookies]
+    response.headers.setlist("Set-Cookie", partitioned_cookies)
+
+
 def clear_token_response(payload=None, status=200):
     """Create a response that clears JWT access cookies."""
-    from flask import jsonify
+    from flask import current_app, jsonify
     from flask_jwt_extended import unset_jwt_cookies
 
     response = jsonify(payload or {"status": "success", "message": "Logged out"})
     unset_jwt_cookies(response)
+    if _resolve_partitioned(current_app):
+        _make_cookies_partitioned(response)
     return response, status
 
 
