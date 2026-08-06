@@ -108,9 +108,7 @@ def _make_cookies_persistent(response, max_age_seconds):
     cookies = response.headers.getlist("Set-Cookie")
     if not cookies:
         return
-    persistent_cookies = [
-        f"{cookie}; Max-Age={max_age_seconds}" for cookie in cookies
-    ]
+    persistent_cookies = [f"{cookie}; Max-Age={max_age_seconds}" for cookie in cookies]
     response.headers.setlist("Set-Cookie", persistent_cookies)
 
 

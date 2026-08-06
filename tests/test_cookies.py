@@ -118,9 +118,7 @@ def test_token_response_persistent_accepts_timedelta_config():
         from flask_jwt_extended import create_access_token
 
         token = create_access_token(identity="1")
-        response, status = token_response(
-            {"status": "ok"}, 200, token, persistent=True
-        )
+        response, status = token_response({"status": "ok"}, 200, token, persistent=True)
 
     cookie_str = "; ".join(response.headers.getlist("Set-Cookie"))
     assert "Max-Age=604800" in cookie_str  # 7 days in seconds
@@ -166,9 +164,7 @@ def test_token_response_persistent_sets_max_age_on_all_cookies():
         from flask_jwt_extended import create_access_token
 
         token = create_access_token(identity="1")
-        response, status = token_response(
-            {"status": "ok"}, 200, token, persistent=True
-        )
+        response, status = token_response({"status": "ok"}, 200, token, persistent=True)
 
     cookies = response.headers.getlist("Set-Cookie")
     # At least 2 cookies: access token + CSRF
