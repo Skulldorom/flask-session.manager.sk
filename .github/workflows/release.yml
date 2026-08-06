@@ -177,7 +177,8 @@ jobs:
 
           [skip-version]"
           git tag "v${NEW_VERSION}"
-          git push origin "HEAD:$DEFAULT_BRANCH" --follow-tags
+          git push origin "HEAD:$DEFAULT_BRANCH"
+          git push origin "v${NEW_VERSION}"
 
       # ── Build + publish ─────────────────────────────────────
       - if: steps.version_part.outputs.skip != 'true'
