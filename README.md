@@ -4,6 +4,10 @@
 [![Python](https://img.shields.io/pypi/pyversions/flask-session.manager.sk)](https://pypi.org/project/flask-session.manager.sk/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 
+<p align="center">
+  <a href="https://ko-fi.com/skulldorom"><img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Support me on Ko-fi" /></a>
+</p>
+
 Flask companion package for
 [react-session.manager.sk](https://github.com/Skulldorom/react-session.manager.sk).
 
