@@ -7,6 +7,7 @@ from flask_jwt_extended import create_access_token, jwt_required
 
 from flask_session_manager_sk import SessionManager, SessionManagerCallbacks
 from flask_session_manager_sk.cookies import clear_token_response, token_response
+from flask_session_manager_sk.tokens import verify_token_hash
 
 
 class FakeUser:
@@ -17,7 +18,8 @@ class FakeUser:
 
     def verify_token(self, agent, device_uid, token):
         for t in self._tokens:
-            if t["agent"] == agent and t["device_uid"] == device_uid:
+            metadata_matches = t["agent"] == agent and t["device_uid"] == device_uid
+            if metadata_matches and verify_token_hash(token, t["token_hash"]):
                 return t
         return None
 
@@ -204,6 +206,7 @@ def test_logout_clears_cookie(app):
         "/auth/logout",
         headers={
             "X-CSRF-TOKEN": csrf or "",
+            "Origin": "http://localhost:5173",
             "User-Agent": ua,
             "deviceUID": dev_uid,
         },
