@@ -7,6 +7,7 @@ from flask_session_manager_sk.tokens import (
     create_token_hash,
     token_hint,
     update_token_record,
+    verify_session_token_record,
     verify_token_hash,
 )
 
@@ -69,6 +70,48 @@ def test_verify_none_inputs():
     assert verify_token_hash(None, None) is False
 
 
+def test_verify_legacy_empty_hash_is_revoked():
+    assert verify_token_hash("", create_token_hash("")) is False
+    assert verify_token_hash("anything", create_token_hash("")) is False
+
+
+def test_verify_token_hash_uses_compare_digest(monkeypatch):
+    calls = []
+
+    def fake_compare_digest(left, right):
+        calls.append((left, right))
+        return True
+
+    monkeypatch.setattr("hmac.compare_digest", fake_compare_digest)
+
+    assert verify_token_hash("secret", create_token_hash("secret")) is True
+    assert calls == [(create_token_hash("secret"), create_token_hash("secret"))]
+
+
+# ---------------------------------------------------------------------------
+# verify_session_token_record
+# ---------------------------------------------------------------------------
+def test_verify_session_token_record_requires_presented_token_hash_match():
+    record = FakeToken()
+    update_token_record(record, "real-token")
+
+    assert verify_session_token_record("real-token", record) is True
+    assert verify_session_token_record("wrong-token", record) is False
+
+
+def test_verify_session_token_record_rejects_missing_or_revoked_record():
+    active = FakeToken()
+    clear_session_token_value(active)
+
+    legacy = FakeToken()
+    legacy.token_hash = create_token_hash("")
+
+    assert verify_session_token_record("token", None) is False
+    assert verify_session_token_record(None, FakeToken()) is False
+    assert verify_session_token_record("token", active) is False
+    assert verify_session_token_record("token", legacy) is False
+
+
 # ---------------------------------------------------------------------------
 # update_token_record
 # ---------------------------------------------------------------------------
@@ -97,7 +140,7 @@ def test_clear_session_token_value():
     record = FakeToken()
     clear_session_token_value(record)
 
-    assert record.token_hash == create_token_hash("")
+    assert record.token_hash is None
     assert record.hint == ""
     assert record.token is None
     assert isinstance(record.last_modified, datetime)

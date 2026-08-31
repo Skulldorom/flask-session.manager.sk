@@ -25,7 +25,11 @@ def configured_browser_origins(app=None):
     if frontend_origin:
         origins.add(frontend_origin)
 
-    for origin in _app.config.get("CORS_ORIGINS", []):
+    cors_origins = _app.config.get("CORS_ORIGINS", [])
+    if isinstance(cors_origins, str):
+        cors_origins = [cors_origins]
+
+    for origin in cors_origins:
         normalised = _normalise_origin(origin)
         if normalised:
             origins.add(normalised)
@@ -57,9 +61,11 @@ def csrf_origin_is_allowed(req=None, app=None):
     origin = _normalise_origin(_req.headers.get("Origin"))
     referer = _normalise_origin(_req.headers.get("Referer"))
     allowed = configured_browser_origins(_app)
-    return bool(
-        allowed and ((origin and origin in allowed) or (referer and referer in allowed))
-    )
+    if not allowed:
+        return False
+    if origin:
+        return origin in allowed
+    return bool(referer and referer in allowed)
 
 
 def reject_cookie_csrf(req=None, app=None):
@@ -109,7 +115,7 @@ def _make_cookies_persistent(response, max_age_seconds):
     """Append Max-Age to every Set-Cookie header on the response.
 
     Uses only stable Werkzeug APIs (response.headers.getlist /
-    response.headers.setlist) with simple string concatenation —
+    response.headers.setlist) with simple string concatenation -
     no assumptions about flask-jwt-extended internals, no
     version-dependent kwargs, no fragile header regex.
     """
@@ -124,12 +130,12 @@ def _resolve_persistent_max_age(app):
     """Return the persistent Max-Age in integer seconds.
 
     Reads FSM_PERSISTENT_MAX_AGE from app config.  Handles both
-    timedelta and integer config values — flask-jwt-extended accepts
+    timedelta and integer config values - flask-jwt-extended accepts
     either, but Max-Age in a Set-Cookie header MUST be integer
     seconds (RFC 6265).
 
     Raises RuntimeError if FSM_PERSISTENT_MAX_AGE is unset and
-    persistent=True is used — there's no safe default; JWT token
+    persistent=True is used - there's no safe default; JWT token
     expiry is typically 15 minutes which is not a meaningful
     "remember me" duration.
     """
@@ -149,7 +155,7 @@ def _resolve_partitioned(app):
     """Return whether FSM_COOKIE_PARTITIONED is enabled for the app.
 
     CHIPS (Partitioned cookies) requires the cookie to also be
-    ``SameSite=None; Secure`` — browsers ignore the Partitioned attribute
+    ``SameSite=None; Secure`` - browsers ignore the Partitioned attribute
     otherwise.  Raise a clear error instead of silently emitting a cookie
     that WebKit will drop, mirroring the FSM_PERSISTENT_MAX_AGE pattern.
     """
@@ -169,7 +175,7 @@ def _resolve_partitioned(app):
 def _make_cookies_partitioned(response):
     """Append the Partitioned attribute to every Set-Cookie header.
 
-    Uses the same stable Werkzeug APIs as _make_cookies_persistent — no
+    Uses the same stable Werkzeug APIs as _make_cookies_persistent - no
     assumptions about flask-jwt-extended internals, no fragile header regex.
     """
     cookies = response.headers.getlist("Set-Cookie")
