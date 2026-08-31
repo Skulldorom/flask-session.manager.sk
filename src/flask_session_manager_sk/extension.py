@@ -14,9 +14,12 @@ class SessionManagerCallbacks:
         refresh_user_token — create and return a new JWT for a user (or None)
 
     Optional:
-        verify_user_token  — validate a token claim for a user (return record or None).
-                             Called as fn(user, agent, device_uid, token).
-        is_user_active     — check whether a user object is active (return bool)
+        verify_user_token     — validate a token claim for a user (return record or None).
+                                Called as fn(user, agent, device_uid, token).
+        is_user_active        — check whether a user object is active (return bool)
+        is_session_persistent — decide whether an expired-token refresh should
+                                reissue persistent cookies. Called as
+                                fn(user, agent, device_uid, token_record).
     """
 
     user_lookup: Callable[[str], Any | None]
@@ -25,6 +28,9 @@ class SessionManagerCallbacks:
         Callable[[Any, str | None, str | None, str | None], Any | None] | None
     ) = None
     is_user_active: Callable[[Any], bool] | None = None
+    is_session_persistent: (
+        Callable[[Any, str | None, str | None, Any | None], bool] | None
+    ) = None
 
 
 class SessionManager:
@@ -44,8 +50,10 @@ class SessionManager:
             self.init_app(app, callbacks)
 
     def init_app(self, app, callbacks=None):
-        """Register JWT handlers on the given Flask app."""
+        """Register JWT handlers and safe cookie defaults on the given Flask app."""
         self.jwt.init_app(app)
+        self._validate_cookie_config(app)
+        self._register_cookie_csrf_guard(app)
         if callbacks is not None:
             self._register_callbacks(app, callbacks)
 
@@ -69,15 +77,13 @@ class SessionManager:
             def _token_verification(_self, jwt_data):
                 user = callbacks.user_lookup(jwt_data["sub"])
 
-                if callbacks.is_user_active is not None and (
-                    not user or not callbacks.is_user_active(user)
-                ):
-                    return None
+                if not self._user_can_authenticate(user, callbacks):
+                    return False
 
                 from .request import get_dets_from_request
 
                 agent, device_uid, token = get_dets_from_request(request)
-                return callbacks.verify_user_token(user, agent, device_uid, token)
+                return bool(callbacks.verify_user_token(user, agent, device_uid, token))
 
         # ---- verification failure ----
         @self.jwt.token_verification_failed_loader
@@ -92,22 +98,96 @@ class SessionManager:
         def _expired_token(jwt_header, jwt_payload):
             identity = jwt_payload["sub"]
             user = callbacks.user_lookup(identity)
-            if user is None:
-                return (
-                    jsonify(code="Invalid", msg="Invalid Token"),
-                    455,
-                )
+            if not self._user_can_authenticate(user, callbacks):
+                return self._invalid_token_response()
 
+            from .cookies import token_response
             from .request import get_dets_from_request
 
-            agent, device_uid, _ = get_dets_from_request(request)
+            agent, device_uid, token = get_dets_from_request(request)
+            token_record = None
+            if callbacks.verify_user_token is not None:
+                token_record = callbacks.verify_user_token(user, agent, device_uid, token)
+                if not token_record:
+                    return self._invalid_token_response()
+
+            persistent = False
+            if callbacks.is_session_persistent is not None:
+                persistent = bool(
+                    callbacks.is_session_persistent(user, agent, device_uid, token_record)
+                )
+
             new_token = callbacks.refresh_user_token(user, agent, device_uid)
             if new_token:
-                return (
-                    jsonify(refreshed=True, access_token=new_token),
+                return token_response(
+                    {"refreshed": True},
                     200,
+                    access_token=new_token,
+                    persistent=persistent,
                 )
-            return (
-                jsonify(code="Invalid", msg="Invalid Token"),
-                455,
+            return self._invalid_token_response()
+
+    @staticmethod
+    def _invalid_token_response():
+        from flask import jsonify
+
+        return (
+            jsonify(code="Invalid", msg="Invalid Token"),
+            455,
+        )
+
+    @staticmethod
+    def _user_can_authenticate(user, callbacks):
+        if user is None:
+            return False
+        if callbacks.is_user_active is not None and not callbacks.is_user_active(user):
+            return False
+        return True
+
+    def _register_cookie_csrf_guard(self, app):
+        if not self._cookie_auth_enabled(app):
+            return
+        if app.config.get("FSM_CSRF_ORIGIN_CHECK", True) is False:
+            return
+
+        from .cookies import reject_cookie_csrf
+
+        @app.before_request
+        def _flask_session_manager_cookie_csrf_guard():
+            return reject_cookie_csrf()
+
+    def _validate_cookie_config(self, app):
+        if not self._cookie_auth_enabled(app):
+            return
+        if app.config.get("FSM_CSRF_ORIGIN_CHECK", True) is False:
+            return
+
+        from .cookies import configured_browser_origins
+
+        if app.config.get("JWT_COOKIE_CSRF_PROTECT") is False:
+            raise RuntimeError(
+                "Cookie authentication requires JWT_COOKIE_CSRF_PROTECT=True "
+                "unless FSM_CSRF_ORIGIN_CHECK=False is set deliberately."
             )
+
+        samesite = app.config.get("JWT_COOKIE_SAMESITE")
+        secure = app.config.get("JWT_COOKIE_SECURE")
+        if samesite == "None" and not secure:
+            raise RuntimeError(
+                "Cookie authentication with JWT_COOKIE_SAMESITE='None' requires "
+                "JWT_COOKIE_SECURE=True."
+            )
+
+        if not configured_browser_origins(app):
+            raise RuntimeError(
+                "Cookie CSRF/origin protection requires at least one valid "
+                "FRONTEND_URL or CORS_ORIGINS entry, or set "
+                "FSM_CSRF_ORIGIN_CHECK=False for a deliberate opt-out."
+            )
+
+    @staticmethod
+    def _cookie_auth_enabled(app):
+        locations = app.config.get("JWT_TOKEN_LOCATION", [])
+        if isinstance(locations, str):
+            locations = [locations]
+        return "cookies" in locations
