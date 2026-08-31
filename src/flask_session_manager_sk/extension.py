@@ -10,14 +10,14 @@ class SessionManagerCallbacks:
     """Callback hooks for the SessionManager extension.
 
     Required:
-        user_lookup        — resolve an identity value to a user object (or None)
-        refresh_user_token — create and return a new JWT for a user (or None)
+        user_lookup        - resolve an identity value to a user object (or None)
+        refresh_user_token - create and return a new JWT for a user (or None)
 
     Optional:
-        verify_user_token     — validate a token claim for a user (return record or None).
+        verify_user_token     - validate a token claim for a user.
                                 Called as fn(user, agent, device_uid, token).
-        is_user_active        — check whether a user object is active (return bool)
-        is_session_persistent — decide whether an expired-token refresh should
+        is_user_active        - check whether a user object is active (return bool)
+        is_session_persistent - decide whether an expired-token refresh should
                                 reissue persistent cookies. Called as
                                 fn(user, agent, device_uid, token_record).
     """
@@ -107,14 +107,18 @@ class SessionManager:
             agent, device_uid, token = get_dets_from_request(request)
             token_record = None
             if callbacks.verify_user_token is not None:
-                token_record = callbacks.verify_user_token(user, agent, device_uid, token)
+                token_record = callbacks.verify_user_token(
+                    user, agent, device_uid, token
+                )
                 if not token_record:
                     return self._invalid_token_response()
 
             persistent = False
             if callbacks.is_session_persistent is not None:
                 persistent = bool(
-                    callbacks.is_session_persistent(user, agent, device_uid, token_record)
+                    callbacks.is_session_persistent(
+                        user, agent, device_uid, token_record
+                    )
                 )
 
             new_token = callbacks.refresh_user_token(user, agent, device_uid)
@@ -140,9 +144,9 @@ class SessionManager:
     def _user_can_authenticate(user, callbacks):
         if user is None:
             return False
-        if callbacks.is_user_active is not None and not callbacks.is_user_active(user):
-            return False
-        return True
+        return not (
+            callbacks.is_user_active is not None and not callbacks.is_user_active(user)
+        )
 
     def _register_cookie_csrf_guard(self, app):
         if not self._cookie_auth_enabled(app):

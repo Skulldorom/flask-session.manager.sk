@@ -138,7 +138,7 @@ def test_token_response_persistent_requires_config():
 
 
 def test_token_response_persistent_no_token_no_cookie_manipulation():
-    """Without an access_token, persistent flag is ignored — no cookie at all."""
+    """Without an access_token, persistent flag is ignored - no cookie at all."""
     from datetime import timedelta
 
     app = make_app({"FSM_PERSISTENT_MAX_AGE": timedelta(days=30)})
@@ -151,7 +151,7 @@ def test_token_response_persistent_no_token_no_cookie_manipulation():
 
 def test_token_response_persistent_sets_max_age_on_all_cookies():
     """persistent=True appends Max-Age to EVERY Set-Cookie header from
-    flask-jwt-extended — access-token, CSRF, and any future additions."""
+    flask-jwt-extended - access-token, CSRF, and any future additions."""
     from datetime import timedelta
 
     app = make_app(

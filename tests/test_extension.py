@@ -36,9 +36,12 @@ class FakeUser:
 
     def check_token(self, agent, device_uid, token_str):
         for record in self.tokens:
-            if record.agent == agent and record.device_uid == device_uid:
-                if verify_session_token_record(token_str, record):
-                    return record
+            if (
+                record.agent == agent
+                and record.device_uid == device_uid
+                and verify_session_token_record(token_str, record)
+            ):
+                return record
         return None
 
     def add_token(self, raw_token, agent, device_uid, persistent=False):
@@ -50,7 +53,9 @@ class FakeUser:
         if token_record is not None:
             return bool(token_record.persistent)
         return any(
-            record.agent == agent and record.device_uid == device_uid and record.persistent
+            record.agent == agent
+            and record.device_uid == device_uid
+            and record.persistent
             for record in self.tokens
         )
 
