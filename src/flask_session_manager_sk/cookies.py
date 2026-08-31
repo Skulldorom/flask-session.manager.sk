@@ -25,7 +25,11 @@ def configured_browser_origins(app=None):
     if frontend_origin:
         origins.add(frontend_origin)
 
-    for origin in _app.config.get("CORS_ORIGINS", []):
+    cors_origins = _app.config.get("CORS_ORIGINS", [])
+    if isinstance(cors_origins, str):
+        cors_origins = [cors_origins]
+
+    for origin in cors_origins:
         normalised = _normalise_origin(origin)
         if normalised:
             origins.add(normalised)
@@ -57,9 +61,11 @@ def csrf_origin_is_allowed(req=None, app=None):
     origin = _normalise_origin(_req.headers.get("Origin"))
     referer = _normalise_origin(_req.headers.get("Referer"))
     allowed = configured_browser_origins(_app)
-    return bool(
-        allowed and ((origin and origin in allowed) or (referer and referer in allowed))
-    )
+    if not allowed:
+        return False
+    if origin:
+        return origin in allowed
+    return bool(referer and referer in allowed)
 
 
 def reject_cookie_csrf(req=None, app=None):

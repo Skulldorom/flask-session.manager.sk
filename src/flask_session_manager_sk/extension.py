@@ -101,8 +101,11 @@ class SessionManager:
             if not self._user_can_authenticate(user, callbacks):
                 return self._invalid_token_response()
 
-            from .cookies import token_response
+            from .cookies import request_has_bearer_auth, token_response
             from .request import get_dets_from_request
+
+            if request_has_bearer_auth(request):
+                return self._invalid_token_response()
 
             agent, device_uid, token = get_dets_from_request(request)
             token_record = None

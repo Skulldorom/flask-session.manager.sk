@@ -155,7 +155,7 @@ stored in the package.
 | `FSM_PERSISTENT_MAX_AGE` | For `persistent=True` | - | `timedelta` or int seconds for remembered-session cookie `Max-Age` |
 | `FSM_COOKIE_PARTITIONED` | No | `False` | Append `; Partitioned` (CHIPS) to all auth cookies. Requires `JWT_COOKIE_SAMESITE="None"` and `JWT_COOKIE_SECURE=True`. Helps cross-site cookie auth on supported iOS WebKit/Safari ITP and other third-party-cookie blockers. |
 | `FRONTEND_URL` | For cookie origin checks | - | Canonical URL of the SPA |
-| `CORS_ORIGINS` | For cookie origin checks | - | List of allowed browser origins |
+| `CORS_ORIGINS` | For cookie origin checks | - | Allowed browser origins as a string or list |
 
 When cookie auth and `FSM_CSRF_ORIGIN_CHECK=True` are enabled, initialization
 validates the security-sensitive combinations above and raises `RuntimeError`
@@ -187,9 +187,9 @@ concepts:
   receive `Max-Age`.
 - Remembered cookies (`persistent=True`) receive `Max-Age` from
   `FSM_PERSISTENT_MAX_AGE` and can survive browser restarts.
-- Expired JWTs are refreshed through replacement HttpOnly cookies. The refresh
-  response is signal-only (`{"refreshed": true}`) and does not expose a new raw
-  access token to JavaScript.
+- Expired cookie JWTs are refreshed through replacement HttpOnly cookies. The
+  refresh response is signal-only (`{"refreshed": true}`) and does not expose a
+  new raw access token to JavaScript.
 - `is_session_persistent(...)` decides whether refresh should preserve persistent
   cookie attributes for a remembered session.
 - Absolute versus sliding remembered-session lifetime is application policy. Store
@@ -285,8 +285,11 @@ If your backend currently returns access tokens as JSON payloads (e.g.
 5. **Frontend**: Upgrade `react-session.manager.sk` to v4.0+. It removes
    bearer-token browser storage and sends cookie credentials automatically.
 6. **Backwards compatibility**: Non-browser clients (API scripts, scheduled
-   tasks) can still send bearer authorization when `JWT_TOKEN_LOCATION` includes
-   `"headers"`. The package origin guard skips bearer-authenticated requests.
+   tasks) can still send valid bearer authorization when `JWT_TOKEN_LOCATION`
+   includes `"headers"`. The package origin guard skips bearer-authenticated
+   requests. Expired bearer tokens are not auto-refreshed by this package because
+   refreshed JWTs are only issued through HttpOnly cookies; bearer clients should
+   use the application's explicit token-renewal flow.
 
 ## Development
 

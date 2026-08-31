@@ -236,11 +236,46 @@ def test_cookie_csrf_origin_guard_requires_configured_origins():
         _build_app_and_token(extra_config={"FRONTEND_URL": None, "CORS_ORIGINS": []})
 
 
+def test_cookie_csrf_origin_guard_accepts_string_cors_origin():
+    app, raw_token, dev_uid, _ = _build_app_and_token(
+        extra_config={"FRONTEND_URL": None, "CORS_ORIGINS": "http://localhost:3000"}
+    )
+    client = _make_client_with_token(app, raw_token)
+
+    resp = client.post(
+        "/mutate",
+        headers=_auth_headers(dev_uid, origin="http://localhost:3000"),
+    )
+
+    assert resp.status_code == 200
+
+
 def test_samesite_none_requires_secure_for_cookie_auth():
     with pytest.raises(RuntimeError, match="JWT_COOKIE_SECURE=True"):
         _build_app_and_token(
             extra_config={"JWT_COOKIE_SAMESITE": "None", "JWT_COOKIE_SECURE": False}
         )
+
+
+def test_bearer_only_config_does_not_require_browser_origins():
+    app, raw_token, dev_uid, _ = _build_app_and_token(
+        extra_config={
+            "JWT_TOKEN_LOCATION": ["headers"],
+            "FRONTEND_URL": None,
+            "CORS_ORIGINS": [],
+        }
+    )
+
+    client = app.test_client()
+    resp = client.get(
+        "/protected",
+        headers={
+            **_auth_headers(dev_uid),
+            "Authorization": f"Bearer {raw_token}",
+        },
+    )
+
+    assert resp.status_code == 200
 
 
 # ---------------------------------------------------------------------------
@@ -312,6 +347,7 @@ def test_expired_token_refreshes_with_cookie_without_exposing_token():
     cookie_str = "; ".join(resp.headers.getlist("Set-Cookie"))
     assert "access_token=" in cookie_str
     assert "csrf_access_token=" in cookie_str
+    assert "Max-Age=" not in cookie_str
 
     for cookie_header in resp.headers.getlist("Set-Cookie"):
         name, val = cookie_header.split(";")[0].split("=", 1)
@@ -378,6 +414,123 @@ def test_expired_token_refresh_rejects_revoked_record():
     resp = client.get("/protected", headers=_auth_headers(dev_uid))
 
     assert resp.status_code == 455
+
+
+def test_expired_token_refresh_rejects_legacy_empty_hash_record():
+    app, raw_token, dev_uid, user = _build_app_and_token(
+        extra_config={"JWT_ACCESS_TOKEN_EXPIRES": 1}
+    )
+    user.tokens[0].token_hash = create_token_hash("")
+    client = _make_client_with_token(app, raw_token)
+
+    import time
+
+    time.sleep(1.5)
+
+    resp = client.get("/protected", headers=_auth_headers(dev_uid))
+
+    assert resp.status_code == 455
+
+
+def test_expired_token_refresh_rejects_metadata_match_with_wrong_token():
+    app, _raw_token, dev_uid, _ = _build_app_and_token(
+        extra_config={"JWT_ACCESS_TOKEN_EXPIRES": 1}
+    )
+    with app.app_context():
+        wrong_token = create_access_token(identity="user-1")
+    client = _make_client_with_token(app, wrong_token)
+
+    import time
+
+    time.sleep(1.5)
+
+    resp = client.get("/protected", headers=_auth_headers(dev_uid))
+
+    assert resp.status_code == 455
+
+
+def test_expired_token_refresh_rejects_deleted_user_without_refreshing():
+    refresh_called = False
+
+    def fail_if_refreshed(_user, _agent, _device_uid):
+        nonlocal refresh_called
+        refresh_called = True
+        return "should-not-be-issued"
+
+    app, raw_token, dev_uid, _ = _build_app_and_token(
+        extra_config={"JWT_ACCESS_TOKEN_EXPIRES": 1},
+        callbacks_overrides={
+            "user_lookup": lambda _identity: None,
+            "refresh_user_token": fail_if_refreshed,
+        },
+    )
+    client = _make_client_with_token(app, raw_token)
+
+    import time
+
+    time.sleep(1.5)
+
+    resp = client.get("/protected", headers=_auth_headers(dev_uid))
+
+    assert resp.status_code == 455
+    assert refresh_called is False
+
+
+def test_expired_token_refresh_rejects_inactive_user_without_refreshing():
+    refresh_called = False
+
+    def fail_if_refreshed(_user, _agent, _device_uid):
+        nonlocal refresh_called
+        refresh_called = True
+        return "should-not-be-issued"
+
+    app, raw_token, dev_uid, _ = _build_app_and_token(
+        extra_config={"JWT_ACCESS_TOKEN_EXPIRES": 1},
+        callbacks_overrides={"refresh_user_token": fail_if_refreshed},
+        active=False,
+    )
+    client = _make_client_with_token(app, raw_token)
+
+    import time
+
+    time.sleep(1.5)
+
+    resp = client.get("/protected", headers=_auth_headers(dev_uid))
+
+    assert resp.status_code == 455
+    assert refresh_called is False
+
+
+def test_expired_bearer_token_does_not_refresh_into_cookie_or_json_token():
+    refresh_called = False
+
+    def fail_if_refreshed(_user, _agent, _device_uid):
+        nonlocal refresh_called
+        refresh_called = True
+        return "should-not-be-issued"
+
+    app, raw_token, dev_uid, _ = _build_app_and_token(
+        extra_config={"JWT_TOKEN_LOCATION": ["headers"], "JWT_ACCESS_TOKEN_EXPIRES": 1},
+        callbacks_overrides={"refresh_user_token": fail_if_refreshed},
+    )
+    client = app.test_client()
+
+    import time
+
+    time.sleep(1.5)
+
+    resp = client.get(
+        "/protected",
+        headers={
+            **_auth_headers(dev_uid),
+            "Authorization": f"Bearer {raw_token}",
+        },
+    )
+
+    assert resp.status_code == 455
+    assert refresh_called is False
+    assert "access_token" not in resp.get_json()
+    assert resp.headers.get("Set-Cookie") is None
 
 
 # ---------------------------------------------------------------------------

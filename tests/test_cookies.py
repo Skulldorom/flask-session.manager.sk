@@ -376,6 +376,13 @@ def test_configured_browser_origins():
     assert "http://localhost:3000" in origins
 
 
+def test_configured_browser_origins_accepts_string_cors_origin():
+    app = make_app({"FRONTEND_URL": None, "CORS_ORIGINS": "https://spa.example"})
+    with app.app_context():
+        origins = configured_browser_origins()
+    assert origins == {"https://spa.example"}
+
+
 # ---------------------------------------------------------------------------
 # CSRF rejection
 # ---------------------------------------------------------------------------
@@ -453,6 +460,23 @@ def test_cookie_auth_post_allows_configured_referer():
     ):
         result = reject_cookie_csrf()
     assert result is None
+
+
+def test_cookie_auth_post_rejects_disallowed_origin_even_with_allowed_referer():
+    app = make_app()
+    with app.test_request_context(
+        "/",
+        method="POST",
+        headers={
+            "Cookie": "access_token=abc",
+            "Origin": "https://attacker.com",
+            "Referer": "https://example.com/page",
+        },
+    ):
+        result = reject_cookie_csrf()
+
+    assert result is not None
+    assert result[1] == 403
 
 
 # ---------------------------------------------------------------------------
