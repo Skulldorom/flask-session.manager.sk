@@ -199,9 +199,17 @@ def _set_csrf_header(response, encoded_token):
     Sets ``X-CSRF-TOKEN`` to the CSRF claim from the freshly issued JWT and
     ensures the browser can read it via ``Access-Control-Expose-Headers``.
     The JWT itself stays in the HttpOnly cookie.
+
+    Only emitted when Flask-JWT-Extended's double-submit CSRF protection is
+    enabled (``JWT_COOKIE_CSRF_PROTECT`` is truthy). Under the origin-only
+    fallback (``JWT_COOKIE_CSRF_PROTECT=False``) the access JWT has no ``csrf``
+    claim, so there is nothing to expose and the header is left unset.
     """
+    from flask import current_app
     from flask_jwt_extended import get_csrf_token
 
+    if not current_app.config.get("JWT_COOKIE_CSRF_PROTECT", True):
+        return
     csrf_value = get_csrf_token(encoded_token)
     response.headers[CSRF_HEADER_NAME] = csrf_value
     _expose_header(response, CSRF_HEADER_NAME)
