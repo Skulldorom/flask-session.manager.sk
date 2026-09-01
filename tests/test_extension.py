@@ -109,7 +109,7 @@ def _build_app_and_token(
     def protected():
         return jsonify(status="ok")
 
-    @app.route("/mutate", methods=["POST"])
+    @app.route("/mutate", methods=["POST", "PUT", "PATCH", "DELETE"])
     def mutate():
         return jsonify(status="mutated")
 
@@ -148,8 +148,10 @@ def test_session_manager_direct_init():
     app = Flask(__name__)
     app.config["SECRET_KEY"] = "enough-bytes-for-hmac-sha256"
     app.config["JWT_TOKEN_LOCATION"] = ["cookies"]
+    app.config["JWT_ACCESS_COOKIE_NAME"] = "access_token"
     app.config["JWT_COOKIE_CSRF_PROTECT"] = False
-    app.config["FSM_CSRF_ORIGIN_CHECK"] = False
+    app.config["FSM_CSRF_ORIGIN_CHECK"] = True
+    app.config["FRONTEND_URL"] = "http://localhost:3000"
 
     user = FakeUser("u1")
     manager = SessionManager(
@@ -163,6 +165,187 @@ def test_session_manager_direct_init():
         tok = create_access_token(identity=str(user.id))
     user.add_token(tok, "agent", "dev")
     assert manager.jwt is not None
+
+
+@pytest.mark.parametrize(
+    "csrf,origin,should_succeed",
+    [
+        (True, True, True),
+        (True, False, True),
+        (False, True, True),
+        (False, False, False),
+    ],
+)
+def test_cookie_config_matrix(csrf, origin, should_succeed):
+    """All four CSRF/origin combinations are validated correctly."""
+    app = Flask(__name__)
+    app.config.update(
+        {
+            "SECRET_KEY": "enough-bytes-for-hmac-sha256",
+            "JWT_TOKEN_LOCATION": ["cookies"],
+            "JWT_ACCESS_COOKIE_NAME": "access_token",
+            "JWT_COOKIE_CSRF_PROTECT": csrf,
+            "FSM_CSRF_ORIGIN_CHECK": origin,
+            "FRONTEND_URL": "http://localhost:3000",
+        }
+    )
+
+    user = FakeUser("u1")
+    callbacks = SessionManagerCallbacks(
+        user_lookup=lambda i: user,
+        refresh_user_token=lambda u, a, d: "stub",
+    )
+
+    if should_succeed:
+        manager = SessionManager(app, callbacks=callbacks)
+        assert manager.jwt is not None
+    else:
+        with pytest.raises(RuntimeError, match="at least one of"):
+            SessionManager(app, callbacks=callbacks)
+
+
+def test_cookie_config_matrix_rejects_both_disabled_with_explicit_defaults():
+    """Explicitly setting both protections to False is rejected."""
+    app = Flask(__name__)
+    app.config.update(
+        {
+            "SECRET_KEY": "enough-bytes-for-hmac-sha256",
+            "JWT_TOKEN_LOCATION": ["cookies"],
+            "JWT_ACCESS_COOKIE_NAME": "access_token",
+            "JWT_COOKIE_CSRF_PROTECT": False,
+            "FSM_CSRF_ORIGIN_CHECK": False,
+        }
+    )
+    with pytest.raises(
+        RuntimeError, match="Disabling both protections is not permitted"
+    ):
+        SessionManager(
+            app,
+            callbacks=SessionManagerCallbacks(
+                user_lookup=lambda i: FakeUser("u1"),
+                refresh_user_token=lambda u, a, d: "stub",
+            ),
+        )
+
+
+def _build_origin_only_app_and_token():
+    """Build an app in origin-only fallback mode (CSRF disabled, origin guard on)."""
+    return _build_app_and_token(
+        extra_config={
+            "JWT_COOKIE_CSRF_PROTECT": False,
+            "FSM_CSRF_ORIGIN_CHECK": True,
+        }
+    )
+
+
+def _make_origin_only_client(app, token):
+    """Test client for origin-only mode: no CSRF cookie/header needed."""
+    client = app.test_client()
+    client.set_cookie("access_token", token)
+    return client
+
+
+def _origin_only_headers(dev_uid, origin=None):
+    headers = {"deviceUID": dev_uid, "User-Agent": UA}
+    if origin:
+        headers["Origin"] = origin
+    return headers
+
+
+def test_origin_only_fallback_allows_configured_origin():
+    app, raw_token, dev_uid, _ = _build_origin_only_app_and_token()
+    client = _make_origin_only_client(app, raw_token)
+
+    resp = client.post(
+        "/mutate",
+        headers=_origin_only_headers(dev_uid, origin="http://localhost:3000"),
+    )
+
+    assert resp.status_code == 200
+    assert resp.get_json() == {"status": "mutated"}
+
+
+def test_origin_only_fallback_rejects_unapproved_origin():
+    app, raw_token, dev_uid, _ = _build_origin_only_app_and_token()
+    client = _make_origin_only_client(app, raw_token)
+
+    resp = client.post(
+        "/mutate",
+        headers=_origin_only_headers(dev_uid, origin="http://attacker.example"),
+    )
+
+    assert resp.status_code == 403
+    assert resp.get_json()["message"] == "CSRF origin check failed"
+
+
+def test_origin_only_fallback_fails_closed_when_origin_missing():
+    app, raw_token, dev_uid, _ = _build_origin_only_app_and_token()
+    client = _make_origin_only_client(app, raw_token)
+
+    resp = client.post("/mutate", headers=_origin_only_headers(dev_uid))
+
+    assert resp.status_code == 403
+
+
+def test_origin_only_fallback_skips_bearer_auth():
+    app, raw_token, dev_uid, _ = _build_app_and_token(
+        extra_config={
+            "JWT_TOKEN_LOCATION": ["cookies", "headers"],
+            "JWT_COOKIE_CSRF_PROTECT": False,
+            "FSM_CSRF_ORIGIN_CHECK": True,
+        }
+    )
+    client = _make_origin_only_client(app, raw_token)
+
+    resp = client.post(
+        "/mutate",
+        headers={
+            **_origin_only_headers(dev_uid, origin="http://attacker.example"),
+            "Authorization": f"Bearer {raw_token}",
+        },
+    )
+
+    assert resp.status_code == 200
+
+
+def test_origin_only_fallback_unsafe_methods_require_origin():
+    """All unsafe methods are guarded; safe methods are not."""
+    app, raw_token, dev_uid, _ = _build_origin_only_app_and_token()
+    client = _make_origin_only_client(app, raw_token)
+
+    for method in ("POST", "PUT", "PATCH", "DELETE"):
+        resp = client.open(
+            "/mutate",
+            method=method,
+            headers=_origin_only_headers(dev_uid, origin="http://localhost:3000"),
+        )
+        assert resp.status_code == 200, method
+
+    for method in ("POST", "PUT", "PATCH", "DELETE"):
+        resp = client.open(
+            "/mutate",
+            method=method,
+            headers=_origin_only_headers(dev_uid),
+        )
+        assert resp.status_code == 403, method
+
+    # Safe methods are not origin-guarded.
+    resp = client.get("/protected", headers=_origin_only_headers(dev_uid))
+    assert resp.status_code == 200
+
+
+def test_origin_only_fallback_does_not_require_csrf_cookie_or_header():
+    """With JWT_COOKIE_CSRF_PROTECT=False, no X-CSRF-TOKEN is required."""
+    app, raw_token, dev_uid, _ = _build_origin_only_app_and_token()
+    client = _make_origin_only_client(app, raw_token)
+
+    resp = client.post(
+        "/mutate",
+        headers=_origin_only_headers(dev_uid, origin="http://localhost:3000"),
+    )
+
+    assert resp.status_code == 200
+    assert resp.get_json() == {"status": "mutated"}
 
 
 def test_cookie_csrf_origin_guard_is_registered_by_default():

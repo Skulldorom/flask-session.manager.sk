@@ -148,7 +148,7 @@ stored in the package.
 | `SECRET_KEY` | Yes | - | Flask secret, must be >=32 bytes for HMAC-SHA256 |
 | `JWT_TOKEN_LOCATION` | Yes | - | Include `"cookies"` for browser cookie auth; bearer-only clients can use `"headers"` |
 | `JWT_ACCESS_COOKIE_NAME` | Yes | - | Cookie name; `react-session.manager.sk` expects `"access_token_cookie"` |
-| `JWT_COOKIE_CSRF_PROTECT` | Yes | - | Must be `True` for browser cookie clients unless you deliberately disable package origin checks |
+| `JWT_COOKIE_CSRF_PROTECT` | Yes | - | Must be `True` for recommended browser cookie auth. May be set to `False` when `FSM_CSRF_ORIGIN_CHECK=True` as an explicit reduced-defense fallback. |
 | `JWT_COOKIE_SECURE` | Yes | - | `True` in production and always required when `JWT_COOKIE_SAMESITE="None"` |
 | `JWT_COOKIE_SAMESITE` | No | - | `"Lax"` or `"Strict"`; use `"None"` only with `Secure=True` for cross-site cookies |
 | `FSM_CSRF_ORIGIN_CHECK` | No | `True` | Automatically reject unsafe cookie-auth requests from unconfigured or missing origins. Set `False` only for deliberate, security-reviewed opt-out. |
@@ -157,11 +157,12 @@ stored in the package.
 | `FRONTEND_URL` | For cookie origin checks | - | Canonical URL of the SPA |
 | `CORS_ORIGINS` | For cookie origin checks | - | Allowed browser origins as a string or list |
 
-When cookie auth and `FSM_CSRF_ORIGIN_CHECK=True` are enabled, initialization
-validates the security-sensitive combinations above and raises `RuntimeError`
-with an actionable message if the configuration is unsafe or missing required
-browser origins. Bearer-only configurations are not blocked by these cookie
-checks.
+When cookie auth is enabled, initialization validates the security-sensitive
+combinations above and raises `RuntimeError` with an actionable message if the
+configuration is unsafe or missing required browser origins. Cookie auth
+requires at least one of `JWT_COOKIE_CSRF_PROTECT=True` or
+`FSM_CSRF_ORIGIN_CHECK=True`; disabling both is rejected. Bearer-only
+configurations are not blocked by these cookie checks.
 
 ## CSRF and Origin Policy
 
@@ -176,6 +177,33 @@ complementary defenses:
 - bearer-authenticated requests skip the browser cookie origin guard
 - if both a cookie and a bearer authorization header are present, bearer mode
   wins for the package origin guard
+
+### Origin-only fallback (reduced defense)
+
+The recommended configuration enables both protections:
+
+```python
+JWT_COOKIE_CSRF_PROTECT = True
+FSM_CSRF_ORIGIN_CHECK = True
+```
+
+For a genuinely cross-site SPA/API deployment where frontend JavaScript cannot
+read the API-domain `csrf_access_token` cookie to mirror it into the
+`X-CSRF-TOKEN` header, an explicit origin-only fallback is supported:
+
+```python
+JWT_COOKIE_CSRF_PROTECT = False
+FSM_CSRF_ORIGIN_CHECK = True
+```
+
+This disables Flask-JWT-Extended's double-submit CSRF check while keeping the
+strict `Origin`/`Referer` guard active for unsafe cookie-authenticated requests.
+It is a reduced-defense fallback, not a permanent configuration: proper
+cross-site CSRF token transport should remain the long-term solution.
+
+The package fails closed when both protections are disabled together
+(`JWT_COOKIE_CSRF_PROTECT=False` + `FSM_CSRF_ORIGIN_CHECK=False`) for cookie
+authentication.
 
 ## Session Lifetime and Remember Me
 
