@@ -145,7 +145,7 @@ def _login_and_configure_client(app, device_uid="dev-test"):
 # ---------------------------------------------------------------------------
 # Full lifecycle
 # ---------------------------------------------------------------------------
-def test_login_sets_cookie(app):
+def test_login_sets_cookie_and_csrf_header(app):
     client = app.test_client()
     resp = client.post(
         "/auth/login",
@@ -163,6 +163,8 @@ def test_login_sets_cookie(app):
     cookie_str = "; ".join(cookies)
     assert "access_token_cookie=" in cookie_str
     assert "HttpOnly" in cookie_str
+    assert "X-CSRF-TOKEN" in resp.headers
+    assert "X-CSRF-TOKEN" in resp.headers["Access-Control-Expose-Headers"]
 
 
 def test_who_returns_logged_out_before_login(app):
