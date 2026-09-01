@@ -166,16 +166,23 @@ class SessionManager:
     def _validate_cookie_config(self, app):
         if not self._cookie_auth_enabled(app):
             return
-        if app.config.get("FSM_CSRF_ORIGIN_CHECK", True) is False:
+
+        csrf_enabled = app.config.get("JWT_COOKIE_CSRF_PROTECT", True) is not False
+        origin_check_enabled = (
+            app.config.get("FSM_CSRF_ORIGIN_CHECK", True) is not False
+        )
+
+        if not csrf_enabled and not origin_check_enabled:
+            raise RuntimeError(
+                "Cookie authentication requires at least one of "
+                "JWT_COOKIE_CSRF_PROTECT=True or FSM_CSRF_ORIGIN_CHECK=True. "
+                "Disabling both protections is not permitted."
+            )
+
+        if not origin_check_enabled:
             return
 
         from .cookies import configured_browser_origins
-
-        if app.config.get("JWT_COOKIE_CSRF_PROTECT") is False:
-            raise RuntimeError(
-                "Cookie authentication requires JWT_COOKIE_CSRF_PROTECT=True "
-                "unless FSM_CSRF_ORIGIN_CHECK=False is set deliberately."
-            )
 
         samesite = app.config.get("JWT_COOKIE_SAMESITE")
         secure = app.config.get("JWT_COOKIE_SECURE")
