@@ -178,6 +178,64 @@ complementary defenses:
 - if both a cookie and a bearer authorization header are present, bearer mode
   wins for the package origin guard
 
+### Same-site readable-cookie CSRF
+
+When the SPA and API share a registrable domain (e.g. `app.example.com` and
+`api.example.com`), the browser can read the `csrf_access_token` cookie that
+`token_response()` sets. Configure the frontend Axios instance with:
+
+```js
+axios.defaults.withCredentials = true;
+axios.defaults.withXSRFToken = true;
+axios.defaults.xsrfCookieName = "csrf_access_token";
+axios.defaults.xsrfHeaderName = "X-CSRF-TOKEN";
+```
+
+Axios then reads the cookie and sends it as `X-CSRF-TOKEN` automatically.
+
+### Genuinely cross-site SPA/API CSRF
+
+When the SPA and API live on different registrable domains (e.g.
+`https://portal.example.com` and `https://api.herokuapp.com`), the browser cannot
+read the API-scoped `csrf_access_token` cookie from the SPA's origin. In this
+case `token_response()` and the expired-token refresh path also return the
+current CSRF value in the response header:
+
+```http
+X-CSRF-TOKEN: <current csrf claim>
+Access-Control-Expose-Headers: X-CSRF-TOKEN
+```
+
+The access JWT itself remains HttpOnly and is never exposed to JavaScript.
+
+Required CORS configuration for cross-site deployments:
+
+```python
+CORS(
+    app,
+    supports_credentials=True,
+    origins=app.config["CORS_ORIGINS"],  # must not be "*" with credentials
+    allow_headers=["Content-Type", "appVersion", "deviceUID", "X-CSRF-TOKEN"],
+    expose_headers=["X-CSRF-TOKEN"],
+)
+```
+
+The frontend companion `react-session.manager.sk` (v4.2+) captures this header
+in memory and attaches it to unsafe requests automatically. Do not store the
+CSRF value in `localStorage` or `sessionStorage`.
+
+### Required request header
+
+Unsafe cookie-auth requests must include:
+
+```http
+X-CSRF-TOKEN: <current csrf claim>
+```
+
+`token_response()` emits both the readable `csrf_access_token` cookie (for
+same-site deployments) and the `X-CSRF-TOKEN` response header (for cross-site
+deployments), so both topologies work without backend changes.
+
 ### Origin-only fallback (reduced defense)
 
 The recommended configuration enables both protections:
@@ -187,9 +245,10 @@ JWT_COOKIE_CSRF_PROTECT = True
 FSM_CSRF_ORIGIN_CHECK = True
 ```
 
-For a genuinely cross-site SPA/API deployment where frontend JavaScript cannot
-read the API-domain `csrf_access_token` cookie to mirror it into the
-`X-CSRF-TOKEN` header, an explicit origin-only fallback is supported:
+The header transport above is the preferred cross-site solution and is now
+implemented by this package (v1.3+) paired with
+`react-session.manager.sk` v4.2+. For consumers that cannot yet adopt it, an
+explicit origin-only fallback remains supported:
 
 ```python
 JWT_COOKIE_CSRF_PROTECT = False
@@ -198,8 +257,7 @@ FSM_CSRF_ORIGIN_CHECK = True
 
 This disables Flask-JWT-Extended's double-submit CSRF check while keeping the
 strict `Origin`/`Referer` guard active for unsafe cookie-authenticated requests.
-It is a reduced-defense fallback, not a permanent configuration: proper
-cross-site CSRF token transport should remain the long-term solution.
+It is a reduced-defense fallback, not a permanent configuration.
 
 The package fails closed when both protections are disabled together
 (`JWT_COOKIE_CSRF_PROTECT=False` + `FSM_CSRF_ORIGIN_CHECK=False`) for cookie
@@ -218,6 +276,8 @@ concepts:
 - Expired cookie JWTs are refreshed through replacement HttpOnly cookies. The
   refresh response is signal-only (`{"refreshed": true}`) and does not expose a
   new raw access token to JavaScript.
+- The refresh response also emits a new `X-CSRF-TOKEN` header and exposes it,
+  so cross-site SPAs can update their in-memory CSRF value.
 - `is_session_persistent(...)` decides whether refresh should preserve persistent
   cookie attributes for a remembered session.
 - Absolute versus sliding remembered-session lifetime is application policy. Store
@@ -272,7 +332,7 @@ WebKit keeps them even with third-party cookies blocked. Requirements:
 
 The frontend companion
 [react-session.manager.sk](https://github.com/Skulldorom/react-session.manager.sk)
-(v4.0+) uses this transport contract:
+(v4.2+) uses this transport contract:
 
 - **Axios** configured with `withCredentials: true`, `withXSRFToken: true`
 - Cookies expected at default Flask-JWT-Extended names:
@@ -282,6 +342,9 @@ The frontend companion
 - `deviceUID` header sent on every request
 - `appVersion` header sent on every request
 - No `Authorization` bearer header for browser requests
+- For cross-site deployments, the CSRF value is captured from the
+  `X-CSRF-TOKEN` response header (in memory only) and attached to unsafe
+  requests automatically
 - Legacy `localStorage`/`sessionStorage` bearer tokens are automatically cleared
 
 ## Internal Modules
@@ -303,15 +366,17 @@ If your backend currently returns access tokens as JSON payloads (e.g.
 1. **Package adoption**: Wire `SessionManager` with your user-lookup,
    token-refresh, token-verification, and optional persistence callbacks.
 2. **Login endpoint**: Call `token_response(payload, status, access_token)`
-   instead of `jsonify(payload)`. This sets the HttpOnly cookie automatically.
+   instead of `jsonify(payload)`. This sets the HttpOnly cookie automatically
+   and also emits the `X-CSRF-TOKEN` header for cross-site SPAs.
 3. **CSRF/origin checks**: Remove custom boilerplate that manually registers
    `reject_cookie_csrf()` as a `before_request` hook. `SessionManager.init_app()`
    registers it automatically for cookie auth by default.
 4. **Token verification**: Make sure your `verify_user_token` callback compares
    the presented JWT against the stored token hash. Matching device metadata
    alone is insecure.
-5. **Frontend**: Upgrade `react-session.manager.sk` to v4.0+. It removes
-   bearer-token browser storage and sends cookie credentials automatically.
+5. **Frontend**: Upgrade `react-session.manager.sk` to v4.2+. It removes
+   bearer-token browser storage, keeps same-site XSRF support, and adds
+   cross-site CSRF header capture for SPAs on a different registrable domain.
 6. **Backwards compatibility**: Non-browser clients (API scripts, scheduled
    tasks) can still send valid bearer authorization when `JWT_TOKEN_LOCATION`
    includes `"headers"`. The package origin guard skips bearer-authenticated

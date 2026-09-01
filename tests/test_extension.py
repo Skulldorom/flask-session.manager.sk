@@ -531,6 +531,8 @@ def test_expired_token_refreshes_with_cookie_without_exposing_token():
     assert "access_token=" in cookie_str
     assert "csrf_access_token=" in cookie_str
     assert "Max-Age=" not in cookie_str
+    assert "X-CSRF-TOKEN" in resp.headers
+    assert "X-CSRF-TOKEN" in resp.headers["Access-Control-Expose-Headers"]
 
     for cookie_header in resp.headers.getlist("Set-Cookie"):
         name, val = cookie_header.split(";")[0].split("=", 1)
@@ -538,6 +540,30 @@ def test_expired_token_refreshes_with_cookie_without_exposing_token():
 
     follow_up = client.get("/protected", headers=_auth_headers(dev_uid))
     assert follow_up.status_code == 200
+
+
+def test_expired_token_refresh_csrf_header_matches_new_cookie():
+    app, raw_token, dev_uid, _ = _build_app_and_token(
+        extra_config={"JWT_ACCESS_TOKEN_EXPIRES": 1}
+    )
+    client = _make_client_with_token(app, raw_token)
+
+    import time
+
+    time.sleep(1.5)
+
+    resp = client.get("/protected", headers=_auth_headers(dev_uid))
+
+    assert resp.status_code == 200
+    assert "X-CSRF-TOKEN" in resp.headers
+
+    new_csrf_cookie = None
+    for cookie in resp.headers.getlist("Set-Cookie"):
+        if cookie.startswith("csrf_access_token="):
+            new_csrf_cookie = cookie.split(";")[0].split("=", 1)[1]
+            break
+    assert new_csrf_cookie is not None
+    assert resp.headers["X-CSRF-TOKEN"] == new_csrf_cookie
 
 
 def test_expired_persistent_session_refresh_preserves_max_age():
@@ -559,6 +585,7 @@ def test_expired_persistent_session_refresh_preserves_max_age():
     assert resp.status_code == 200
     for cookie in resp.headers.getlist("Set-Cookie"):
         assert "Max-Age=2592000" in cookie
+    assert "X-CSRF-TOKEN" in resp.headers
 
 
 def test_expired_partitioned_session_refresh_preserves_partitioned():
@@ -581,6 +608,8 @@ def test_expired_partitioned_session_refresh_preserves_partitioned():
     assert resp.status_code == 200
     for cookie in resp.headers.getlist("Set-Cookie"):
         assert "Partitioned" in cookie
+    assert "X-CSRF-TOKEN" in resp.headers
+    assert "X-CSRF-TOKEN" in resp.headers["Access-Control-Expose-Headers"]
 
 
 def test_expired_token_refresh_rejects_revoked_record():
@@ -597,6 +626,7 @@ def test_expired_token_refresh_rejects_revoked_record():
     resp = client.get("/protected", headers=_auth_headers(dev_uid))
 
     assert resp.status_code == 455
+    assert "X-CSRF-TOKEN" not in resp.headers
 
 
 def test_expired_token_refresh_rejects_legacy_empty_hash_record():
@@ -613,6 +643,7 @@ def test_expired_token_refresh_rejects_legacy_empty_hash_record():
     resp = client.get("/protected", headers=_auth_headers(dev_uid))
 
     assert resp.status_code == 455
+    assert "X-CSRF-TOKEN" not in resp.headers
 
 
 def test_expired_token_refresh_rejects_metadata_match_with_wrong_token():
@@ -630,6 +661,7 @@ def test_expired_token_refresh_rejects_metadata_match_with_wrong_token():
     resp = client.get("/protected", headers=_auth_headers(dev_uid))
 
     assert resp.status_code == 455
+    assert "X-CSRF-TOKEN" not in resp.headers
 
 
 def test_expired_token_refresh_rejects_deleted_user_without_refreshing():
@@ -657,6 +689,7 @@ def test_expired_token_refresh_rejects_deleted_user_without_refreshing():
 
     assert resp.status_code == 455
     assert refresh_called is False
+    assert "X-CSRF-TOKEN" not in resp.headers
 
 
 def test_expired_token_refresh_rejects_inactive_user_without_refreshing():
@@ -682,6 +715,7 @@ def test_expired_token_refresh_rejects_inactive_user_without_refreshing():
 
     assert resp.status_code == 455
     assert refresh_called is False
+    assert "X-CSRF-TOKEN" not in resp.headers
 
 
 def test_expired_bearer_token_does_not_refresh_into_cookie_or_json_token():
@@ -714,6 +748,7 @@ def test_expired_bearer_token_does_not_refresh_into_cookie_or_json_token():
     assert refresh_called is False
     assert "access_token" not in resp.get_json()
     assert resp.headers.get("Set-Cookie") is None
+    assert "X-CSRF-TOKEN" not in resp.headers
 
 
 # ---------------------------------------------------------------------------

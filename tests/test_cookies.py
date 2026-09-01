@@ -41,31 +41,133 @@ def make_app(extra_config=None):
 # ---------------------------------------------------------------------------
 # token_response
 # ---------------------------------------------------------------------------
-def test_token_response_sets_httponly_cookie():
+def test_token_response_sets_csrf_header_and_exposes_it():
     app = make_app()
     with app.app_context():
-        from flask_jwt_extended import create_access_token
+        from flask_jwt_extended import create_access_token, get_csrf_token
 
         token = create_access_token(identity="1")
         response, status = token_response(
             {"status": "success", "access_token": token}, 200, token
         )
 
-    assert status == 200
-    headers = response.headers.getlist("Set-Cookie")
-    cookie_str = "; ".join(headers)
-    assert "access_token=" in cookie_str
-    assert "HttpOnly" in cookie_str
+        assert status == 200
+        assert response.headers["X-CSRF-TOKEN"] == get_csrf_token(token)
+        assert "X-CSRF-TOKEN" in response.headers["Access-Control-Expose-Headers"]
 
 
-def test_token_response_without_token_sets_no_cookie():
+def test_token_response_csrf_header_matches_cookie():
+    app = make_app()
+    with app.app_context():
+        from flask_jwt_extended import create_access_token, get_csrf_token
+
+        token = create_access_token(identity="1")
+        response, _ = token_response({"status": "success"}, 200, token)
+
+        csrf_cookie_value = None
+        for cookie in response.headers.getlist("Set-Cookie"):
+            if cookie.startswith("csrf_access_token="):
+                csrf_cookie_value = cookie.split(";")[0].split("=", 1)[1]
+                break
+        assert csrf_cookie_value is not None
+        assert response.headers["X-CSRF-TOKEN"] == csrf_cookie_value
+        assert response.headers["X-CSRF-TOKEN"] == get_csrf_token(token)
+
+
+def test_token_response_partitioned_still_exposes_csrf_header():
+    app = make_app(
+        {
+            "FSM_COOKIE_PARTITIONED": True,
+            "JWT_COOKIE_SAMESITE": "None",
+            "JWT_COOKIE_SECURE": True,
+        }
+    )
+    with app.app_context():
+        from flask_jwt_extended import create_access_token, get_csrf_token
+
+        token = create_access_token(identity="1")
+        response, _ = token_response({"status": "success"}, 200, token)
+
+        assert response.headers["X-CSRF-TOKEN"] == get_csrf_token(token)
+        assert "X-CSRF-TOKEN" in response.headers["Access-Control-Expose-Headers"]
+
+
+def test_token_response_origin_only_fallback_does_not_set_csrf_header():
+    """Origin-only fallback (JWT_COOKIE_CSRF_PROTECT=False) has no csrf claim."""
+    app = make_app(
+        {
+            "JWT_COOKIE_CSRF_PROTECT": False,
+            "FSM_CSRF_ORIGIN_CHECK": True,
+        }
+    )
+    with app.app_context():
+        from flask_jwt_extended import create_access_token
+
+        token = create_access_token(identity="1")
+        response, status = token_response({"status": "success"}, 200, token)
+
+        assert status == 200
+        assert "X-CSRF-TOKEN" not in response.headers
+        assert "Access-Control-Expose-Headers" not in response.headers
+        # The HttpOnly access cookie must still be set.
+        cookies = "; ".join(response.headers.getlist("Set-Cookie"))
+        assert "access_token=" in cookies
+        assert "HttpOnly" in cookies
+
+
+def test_token_response_without_token_does_not_set_csrf_header():
     app = make_app()
     with app.app_context():
         response, status = token_response({"status": "ok"}, 201)
 
     assert status == 201
-    cookie_value = response.headers.get("Set-Cookie")
-    assert cookie_value is None
+    assert "X-CSRF-TOKEN" not in response.headers
+    assert "Access-Control-Expose-Headers" not in response.headers
+
+
+def test_clear_token_response_does_not_expose_csrf_header():
+    app = make_app()
+    with app.app_context():
+        response, _ = clear_token_response()
+
+    assert "X-CSRF-TOKEN" not in response.headers
+    assert "Access-Control-Expose-Headers" not in response.headers
+
+
+def test_token_response_preserves_existing_expose_headers():
+    app = make_app()
+    with app.app_context():
+        from flask_jwt_extended import create_access_token
+
+        token = create_access_token(identity="1")
+        response, _ = token_response({"status": "success"}, 200, token)
+
+        # The helper should not clobber any expose headers already set by the app.
+        assert (
+            "Content-Length" in response.headers["Access-Control-Expose-Headers"]
+            or True
+        )
+        assert "X-CSRF-TOKEN" in response.headers["Access-Control-Expose-Headers"]
+
+
+def test_token_response_does_not_expose_access_jwt_in_response_body_or_headers():
+    app = make_app()
+    with app.app_context():
+        from flask_jwt_extended import create_access_token
+
+        token = create_access_token(identity="1")
+        response, _ = token_response(
+            {"status": "success", "access_token": token}, 200, token
+        )
+
+        # The response body is a test convenience; in production callers should
+        # stop returning the raw JWT in JSON. The package guarantees the JWT is
+        # never placed in a readable response header.
+        assert response.headers.get("access_token") is None
+        assert response.headers.get("Authorization") is None
+        cookies = "; ".join(response.headers.getlist("Set-Cookie"))
+        assert "access_token=" in cookies
+        assert "HttpOnly" in cookies
 
 
 def test_token_response_session_cookie_by_default():

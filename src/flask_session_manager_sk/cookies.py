@@ -4,6 +4,8 @@ from urllib.parse import urlparse
 
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
+CSRF_HEADER_NAME = "X-CSRF-TOKEN"
+
 
 def _normalise_origin(value):
     if not value:
@@ -96,6 +98,11 @@ def token_response(payload, status=200, access_token=None, persistent=False):
     stored in a per-top-level-site partition, which keeps cross-site cookie
     auth working on browsers that block third-party cookies by default
     (notably iOS WebKit / Safari ITP).
+
+    For cross-site SPAs that cannot read the API-scoped CSRF cookie, the
+    current CSRF value is also returned in the ``X-CSRF-TOKEN`` response
+    header and exposed via ``Access-Control-Expose-Headers``. The access
+    JWT itself remains HttpOnly and is never exposed to JavaScript.
     """
     from flask import current_app, jsonify
     from flask_jwt_extended import set_access_cookies
@@ -108,6 +115,7 @@ def token_response(payload, status=200, access_token=None, persistent=False):
             _make_cookies_persistent(response, max_age)
         if _resolve_partitioned(current_app):
             _make_cookies_partitioned(response)
+        _set_csrf_header(response, access_token)
     return response, status
 
 
@@ -183,6 +191,40 @@ def _make_cookies_partitioned(response):
         return
     partitioned_cookies = [f"{cookie}; Partitioned" for cookie in cookies]
     response.headers.setlist("Set-Cookie", partitioned_cookies)
+
+
+def _set_csrf_header(response, encoded_token):
+    """Expose the current CSRF value for cross-site SPAs.
+
+    Sets ``X-CSRF-TOKEN`` to the CSRF claim from the freshly issued JWT and
+    ensures the browser can read it via ``Access-Control-Expose-Headers``.
+    The JWT itself stays in the HttpOnly cookie.
+
+    Only emitted when Flask-JWT-Extended's double-submit CSRF protection is
+    enabled (``JWT_COOKIE_CSRF_PROTECT`` is truthy). Under the origin-only
+    fallback (``JWT_COOKIE_CSRF_PROTECT=False``) the access JWT has no ``csrf``
+    claim, so there is nothing to expose and the header is left unset.
+    """
+    from flask import current_app
+    from flask_jwt_extended import get_csrf_token
+
+    if not current_app.config.get("JWT_COOKIE_CSRF_PROTECT", True):
+        return
+    csrf_value = get_csrf_token(encoded_token)
+    response.headers[CSRF_HEADER_NAME] = csrf_value
+    _expose_header(response, CSRF_HEADER_NAME)
+
+
+def _expose_header(response, header_name):
+    """Add ``header_name`` to ``Access-Control-Expose-Headers`` idempotently.
+
+    This works regardless of which CORS middleware (if any) the application
+    uses, because it mutates the response object directly.
+    """
+    existing = response.headers.get("Access-Control-Expose-Headers", "")
+    names = {name.strip() for name in existing.split(",") if name.strip()}
+    names.add(header_name)
+    response.headers["Access-Control-Expose-Headers"] = ", ".join(sorted(names))
 
 
 def clear_token_response(payload=None, status=200):
