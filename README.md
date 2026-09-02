@@ -97,6 +97,7 @@ Only these names are part of the stable surface:
 | `SessionManager` | Flask extension that wires JWT callbacks |
 | `SessionManagerCallbacks` | Frozen dataclass of application hooks |
 | `token_response` | Create a JSON response with an HttpOnly JWT cookie |
+| `session_response` | Create an authenticated bootstrap response that exposes only the current CSRF claim |
 | `clear_token_response` | Create a response that clears JWT cookies |
 | `verify_session_token_record` | Verify a presented JWT against a server-side token record |
 
@@ -132,6 +133,11 @@ UID are identifiers/signals only. They are not secrets and must never be enough
 to authenticate a session by themselves. Resolve the relevant server-side session
 record with metadata, then compare the presented JWT against the record's stored
 hash with `verify_session_token_record()` or equivalent constant-time logic.
+
+`refresh_user_token` may persist the replacement JWT. Before invoking it, the
+extension validates all package-controlled persistent and Partitioned cookie
+configuration so a known configuration failure cannot leave server and browser
+token state out of sync.
 
 `is_session_persistent` receives `(user, agent, device_uid, token_record)` during
 expired-token refresh. Return `True` only when the remembered-session policy is
@@ -198,8 +204,8 @@ Axios then reads the cookie and sends it as `X-CSRF-TOKEN` automatically.
 When the SPA and API live on different registrable domains (e.g.
 `https://portal.example.com` and `https://api.herokuapp.com`), the browser cannot
 read the API-scoped `csrf_access_token` cookie from the SPA's origin. In this
-case `token_response()` and the expired-token refresh path also return the
-current CSRF value in the response header:
+case `token_response()`, `session_response()`, and the expired-token refresh
+path return the current CSRF value in the response header:
 
 ```http
 X-CSRF-TOKEN: <current csrf claim>
@@ -207,6 +213,23 @@ Access-Control-Expose-Headers: X-CSRF-TOKEN
 ```
 
 The access JWT itself remains HttpOnly and is never exposed to JavaScript.
+
+Use `session_response()` from the authenticated route supplied as the React
+companion's `userLoader`. This restores in-memory CSRF state after a hard reload
+without rotating or exposing the access JWT:
+
+```python
+from flask_jwt_extended import current_user, jwt_required
+from flask_session_manager_sk import session_response
+
+
+@app.get("/auth/who")
+@jwt_required(optional=True)
+def who_am_i():
+    if current_user:
+        return session_response({"logged_in": True, "Info": current_user.to_dict()})
+    return session_response({"logged_in": False})
+```
 
 Required CORS configuration for cross-site deployments:
 
@@ -232,9 +255,10 @@ Unsafe cookie-auth requests must include:
 X-CSRF-TOKEN: <current csrf claim>
 ```
 
-`token_response()` emits both the readable `csrf_access_token` cookie (for
-same-site deployments) and the `X-CSRF-TOKEN` response header (for cross-site
-deployments), so both topologies work without backend changes.
+`token_response()` emits both the readable `csrf_access_token` cookie and the
+`X-CSRF-TOKEN` response header. `session_response()` re-emits the authenticated
+JWT's existing CSRF claim during session bootstrap, so both topologies continue
+working after a hard reload.
 
 ### Origin-only fallback (reduced defense)
 
@@ -367,17 +391,22 @@ If your backend currently returns access tokens as JSON payloads (e.g.
    token-refresh, token-verification, and optional persistence callbacks.
 2. **Login endpoint**: Call `token_response(payload, status, access_token)`
    instead of `jsonify(payload)`. This sets the HttpOnly cookie automatically
-   and also emits the `X-CSRF-TOKEN` header for cross-site SPAs.
-3. **CSRF/origin checks**: Remove custom boilerplate that manually registers
+   and also emits the `X-CSRF-TOKEN` header for cross-site SPAs. The payload
+   must not contain an `access_token` field or the JWT value; attempts fail
+   loudly instead of exposing the credential to JavaScript.
+3. **Session endpoint**: Return authenticated `userLoader`/`whoami` payloads
+   through `session_response()` so a hard reload restores cross-site CSRF state.
+4. **CSRF/origin checks**: Remove custom boilerplate that manually registers
    `reject_cookie_csrf()` as a `before_request` hook. `SessionManager.init_app()`
    registers it automatically for cookie auth by default.
-4. **Token verification**: Make sure your `verify_user_token` callback compares
+5. **Token verification**: Make sure your `verify_user_token` callback compares
    the presented JWT against the stored token hash. Matching device metadata
    alone is insecure.
-5. **Frontend**: Upgrade `react-session.manager.sk` to v4.2+. It removes
+6. **Frontend**: Upgrade `react-session.manager.sk` to the companion version
+   documented in its release notes. It removes
    bearer-token browser storage, keeps same-site XSRF support, and adds
    cross-site CSRF header capture for SPAs on a different registrable domain.
-6. **Backwards compatibility**: Non-browser clients (API scripts, scheduled
+7. **Backwards compatibility**: Non-browser clients (API scripts, scheduled
    tasks) can still send valid bearer authorization when `JWT_TOKEN_LOCATION`
    includes `"headers"`. The package origin guard skips bearer-authenticated
    requests. Expired bearer tokens are not auto-refreshed by this package because
