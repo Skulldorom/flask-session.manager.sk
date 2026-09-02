@@ -5,7 +5,11 @@ from flask import Flask, jsonify
 from flask import request as flask_request
 from flask_jwt_extended import create_access_token, jwt_required
 
-from flask_session_manager_sk import SessionManager, SessionManagerCallbacks
+from flask_session_manager_sk import (
+    SessionManager,
+    SessionManagerCallbacks,
+    session_response,
+)
 from flask_session_manager_sk.cookies import clear_token_response, token_response
 from flask_session_manager_sk.tokens import verify_token_hash
 
@@ -78,7 +82,7 @@ def app():
         device_uid = flask_request.headers.get("deviceUID", "dev-default")
         new_token = user.create_and_store_token(agent, device_uid, app)
         return token_response(
-            {"status": "success", "access_token": new_token},
+            {"status": "success"},
             200,
             new_token,
         )
@@ -89,12 +93,12 @@ def app():
         from flask_jwt_extended import current_user
 
         if current_user:
-            return (
-                jsonify(
-                    logged_in=True,
-                    is_admin=True,
-                    Info={"firstName": "Test", "lastName": "User"},
-                ),
+            return session_response(
+                {
+                    "logged_in": True,
+                    "is_admin": True,
+                    "Info": {"firstName": "Test", "lastName": "User"},
+                },
                 200,
             )
         return jsonify(logged_in=False), 200
@@ -172,6 +176,7 @@ def test_who_returns_logged_out_before_login(app):
     resp = client.get("/auth/who")
     data = resp.get_json()
     assert data["logged_in"] is False
+    assert "X-CSRF-TOKEN" not in resp.headers
 
 
 def test_who_returns_logged_in_after_login(app):
@@ -186,6 +191,9 @@ def test_who_returns_logged_in_after_login(app):
     )
     data = resp.get_json()
     assert data["logged_in"] is True
+    assert resp.headers["X-CSRF-TOKEN"] == csrf
+    assert "X-CSRF-TOKEN" in resp.headers["Access-Control-Expose-Headers"]
+    assert "access_token" not in data
 
 
 def test_protected_route_accessible_after_login(app):
@@ -200,6 +208,26 @@ def test_protected_route_accessible_after_login(app):
     )
     assert resp.status_code == 200
     assert resp.get_json() == {"status": "ok"}
+
+
+def test_bootstrapped_csrf_allows_first_unsafe_request_after_reload(app):
+    client, _csrf, dev_uid, ua = _login_and_configure_client(app, "dev-reload-test")
+    bootstrap = client.get(
+        "/auth/who",
+        headers={"deviceUID": dev_uid, "User-Agent": ua},
+    )
+    recovered_csrf = bootstrap.headers["X-CSRF-TOKEN"]
+
+    response = client.post(
+        "/auth/logout",
+        headers={
+            "X-CSRF-TOKEN": recovered_csrf,
+            "Origin": "http://localhost:5173",
+            "deviceUID": dev_uid,
+            "User-Agent": ua,
+        },
+    )
+    assert response.status_code == 200
 
 
 def test_logout_clears_cookie(app):
