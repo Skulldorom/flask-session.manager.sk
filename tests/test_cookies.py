@@ -47,9 +47,7 @@ def test_token_response_sets_csrf_header_and_exposes_it():
         from flask_jwt_extended import create_access_token, get_csrf_token
 
         token = create_access_token(identity="1")
-        response, status = token_response(
-            {"status": "success", "access_token": token}, 200, token
-        )
+        response, status = token_response({"status": "success"}, 200, token)
 
         assert status == 200
         assert response.headers["X-CSRF-TOKEN"] == get_csrf_token(token)
@@ -150,24 +148,27 @@ def test_token_response_preserves_existing_expose_headers():
         assert "X-CSRF-TOKEN" in response.headers["Access-Control-Expose-Headers"]
 
 
-def test_token_response_does_not_expose_access_jwt_in_response_body_or_headers():
+def test_token_response_rejects_access_jwt_in_response_body():
     app = make_app()
     with app.app_context():
         from flask_jwt_extended import create_access_token
 
         token = create_access_token(identity="1")
-        response, _ = token_response(
-            {"status": "success", "access_token": token}, 200, token
-        )
+        import pytest as pytest_mod
 
-        # The response body is a test convenience; in production callers should
-        # stop returning the raw JWT in JSON. The package guarantees the JWT is
-        # never placed in a readable response header.
-        assert response.headers.get("access_token") is None
-        assert response.headers.get("Authorization") is None
-        cookies = "; ".join(response.headers.getlist("Set-Cookie"))
-        assert "access_token=" in cookies
-        assert "HttpOnly" in cookies
+        with pytest_mod.raises(ValueError, match="must not expose"):
+            token_response({"status": "success", "access_token": token}, 200, token)
+
+
+def test_token_response_rejects_token_under_an_unexpected_key():
+    app = make_app()
+    with app.app_context():
+        import pytest as pytest_mod
+        from flask_jwt_extended import create_access_token
+
+        token = create_access_token(identity="1")
+        with pytest_mod.raises(ValueError, match="must not expose"):
+            token_response({"status": "success", "token": token}, 200, token)
 
 
 def test_token_response_session_cookie_by_default():
@@ -179,9 +180,7 @@ def test_token_response_session_cookie_by_default():
         from flask_jwt_extended import create_access_token
 
         token = create_access_token(identity="1")
-        response, status = token_response(
-            {"status": "success", "access_token": token}, 200, token
-        )
+        response, status = token_response({"status": "success"}, 200, token)
 
     assert status == 200
     cookie_str = "; ".join(response.headers.getlist("Set-Cookie"))
@@ -199,7 +198,7 @@ def test_token_response_persistent_adds_max_age():
 
         token = create_access_token(identity="1")
         response, status = token_response(
-            {"status": "success", "access_token": token},
+            {"status": "success"},
             200,
             token,
             persistent=True,
@@ -483,6 +482,22 @@ def test_configured_browser_origins_accepts_string_cors_origin():
     with app.app_context():
         origins = configured_browser_origins()
     assert origins == {"https://spa.example"}
+
+
+def test_configured_browser_origins_rejects_malformed_entry():
+    import pytest as pytest_mod
+
+    app = make_app({"CORS_ORIGINS": ["https://example.com", "not-a-url"]})
+    with app.app_context(), pytest_mod.raises(RuntimeError, match="CORS_ORIGINS"):
+        configured_browser_origins()
+
+
+def test_configured_browser_origins_rejects_unsupported_scheme():
+    import pytest as pytest_mod
+
+    app = make_app({"FRONTEND_URL": "ftp://example.com", "CORS_ORIGINS": []})
+    with app.app_context(), pytest_mod.raises(RuntimeError, match="FRONTEND_URL"):
+        configured_browser_origins()
 
 
 # ---------------------------------------------------------------------------
