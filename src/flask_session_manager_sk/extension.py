@@ -101,7 +101,11 @@ class SessionManager:
             if not self._user_can_authenticate(user, callbacks):
                 return self._invalid_token_response()
 
-            from .cookies import request_has_bearer_auth, token_response
+            from .cookies import (
+                request_has_bearer_auth,
+                token_response,
+                validate_token_response_config,
+            )
             from .request import get_dets_from_request
 
             if request_has_bearer_auth(request):
@@ -124,6 +128,9 @@ class SessionManager:
                     )
                 )
 
+            # Validate cookie configuration before refresh_user_token is called;
+            # consumers commonly persist the replacement token in that callback.
+            validate_token_response_config(app, persistent=persistent)
             new_token = callbacks.refresh_user_token(user, agent, device_uid)
             if new_token:
                 return token_response(
