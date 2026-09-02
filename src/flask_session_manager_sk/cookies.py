@@ -1,5 +1,6 @@
 """Cookie and CSRF helpers for Flask JWT session management."""
 
+from collections.abc import Mapping
 from urllib.parse import urlparse
 
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
@@ -7,11 +8,34 @@ UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 CSRF_HEADER_NAME = "X-CSRF-TOKEN"
 
 
-def _normalise_origin(value):
-    if not value:
+def _normalise_origin(value, *, strict=False, setting_name="origin"):
+    if value is None:
         return None
-    parsed = urlparse(value)
-    if not parsed.scheme or not parsed.netloc:
+    if not isinstance(value, str):
+        if strict:
+            raise RuntimeError(
+                f"{setting_name} entries must be URL strings; got {value!r}."
+            )
+        return None
+    try:
+        parsed = urlparse(value)
+        valid = (
+            parsed.scheme in {"http", "https"}
+            and bool(parsed.netloc)
+            and bool(parsed.hostname)
+            and parsed.username is None
+            and parsed.password is None
+        )
+        # Accessing port validates malformed values such as ':not-a-port'.
+        _ = parsed.port
+    except ValueError:
+        valid = False
+    if not valid:
+        if strict:
+            raise RuntimeError(
+                f"Invalid {setting_name} entry {value!r}; expected an http(s) "
+                "browser URL."
+            )
         return None
     return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
 
@@ -23,7 +47,9 @@ def configured_browser_origins(app=None):
     origins = set()
 
     frontend_url = _app.config.get("FRONTEND_URL")
-    frontend_origin = _normalise_origin(frontend_url)
+    frontend_origin = _normalise_origin(
+        frontend_url, strict=frontend_url is not None, setting_name="FRONTEND_URL"
+    )
     if frontend_origin:
         origins.add(frontend_origin)
 
@@ -32,7 +58,7 @@ def configured_browser_origins(app=None):
         cors_origins = [cors_origins]
 
     for origin in cors_origins:
-        normalised = _normalise_origin(origin)
+        normalised = _normalise_origin(origin, strict=True, setting_name="CORS_ORIGINS")
         if normalised:
             origins.add(normalised)
 
@@ -107,6 +133,9 @@ def token_response(payload, status=200, access_token=None, persistent=False):
     from flask import current_app, jsonify
     from flask_jwt_extended import set_access_cookies
 
+    _validate_cookie_only_payload(payload, access_token)
+    if access_token:
+        validate_token_response_config(current_app, persistent=persistent)
     response = jsonify(payload)
     if access_token:
         set_access_cookies(response, access_token)
@@ -117,6 +146,51 @@ def token_response(payload, status=200, access_token=None, persistent=False):
             _make_cookies_partitioned(response)
         _set_csrf_header(response, access_token)
     return response, status
+
+
+def session_response(payload, status=200):
+    """Create an authenticated session/bootstrap response with its CSRF claim.
+
+    The calling route must establish JWT context (normally with
+    ``@jwt_required()`` or ``@jwt_required(optional=True)``). The access JWT is
+    never returned; only its double-submit CSRF claim is exposed.
+    """
+    from flask import current_app, jsonify
+    from flask_jwt_extended import get_jwt
+
+    response = jsonify(payload)
+    if not current_app.config.get("JWT_COOKIE_CSRF_PROTECT", True):
+        return response, status
+    if not request_uses_cookie_auth() or request_has_bearer_auth():
+        return response, status
+
+    jwt_data = get_jwt()
+    csrf_value = jwt_data.get("csrf") if jwt_data else None
+    if csrf_value:
+        _set_csrf_value_header(response, csrf_value)
+    return response, status
+
+
+def validate_token_response_config(app=None, *, persistent=False):
+    """Validate failure-prone cookie options before a token is created/stored."""
+    from flask import current_app
+
+    _app = app if app is not None else current_app
+    if persistent:
+        _resolve_persistent_max_age(_app)
+    _resolve_partitioned(_app)
+
+
+def _validate_cookie_only_payload(payload, access_token):
+    if not access_token or not isinstance(payload, Mapping):
+        return
+    if "access_token" in payload or any(
+        value == access_token for value in payload.values()
+    ):
+        raise ValueError(
+            "token_response() payload must not expose the access JWT; it is set "
+            "only as an HttpOnly cookie."
+        )
 
 
 def _make_cookies_persistent(response, max_age_seconds):
@@ -211,6 +285,11 @@ def _set_csrf_header(response, encoded_token):
     if not current_app.config.get("JWT_COOKIE_CSRF_PROTECT", True):
         return
     csrf_value = get_csrf_token(encoded_token)
+    _set_csrf_value_header(response, csrf_value)
+
+
+def _set_csrf_value_header(response, csrf_value):
+    """Expose a known CSRF claim without requiring access to the encoded JWT."""
     response.headers[CSRF_HEADER_NAME] = csrf_value
     _expose_header(response, CSRF_HEADER_NAME)
 
