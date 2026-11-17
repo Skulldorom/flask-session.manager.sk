@@ -4,233 +4,331 @@ on:
   workflow_run:
     workflows: [CI]
     types: [completed]
-  workflow_dispatch:
-    inputs:
-      version_part:
-        description: Version increment
-        required: true
-        type: choice
-        default: patch
-        options:
-          - major
-          - minor
-          - patch
-  push:
-    tags:
-      - "v*.*.*"
+    branches: [main]
 
 permissions:
-  contents: write
-  pull-requests: read
-  id-token: write
+  contents: read
 
 concurrency:
-  group: release-${{ github.event.workflow_run.head_branch || github.ref }}
+  group: release-main
   cancel-in-progress: false
 
-env:
-  DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-  LABEL_MAJOR: version:major
-  LABEL_MINOR: version:minor
-
 jobs:
-  # ── Manual dispatch: run CI first ──────────────────────────
-  #
-  # NOTE: When this job is skipped (workflow_run trigger),
-  # `needs.test.result` resolves to 'skipped'. The publish
-  # job gates on 'success' or 'skipped'. Validate this
-  # behavior in a small prototype if GitHub Actions version
-  # is uncertain — the alternative is two separate publish
-  # job definitions (one per trigger), at the cost of
-  # duplicating the job body.
-  test:
-    name: Run CI
-    if: github.event_name == 'workflow_dispatch'
-    uses: ./.github/workflows/ci.yml
-
-  # ═══════════════════════════════════════════════════════════════
-  # Auto-version (workflow_run) + Manual dispatch (workflow_dispatch)
-  # ═══════════════════════════════════════════════════════════════
-  publish:
-    name: Publish
+  authorize:
+    name: Authorize exact CI source
     runs-on: ubuntu-latest
-    needs: test
-    if: |
-      always() &&
-      (needs.test.result == 'success' || needs.test.result == 'skipped') &&
-      (
-        (github.event_name == 'workflow_run' &&
-         github.event.workflow_run.conclusion == 'success' &&
-         github.event.workflow_run.head_branch == github.event.repository.default_branch) ||
-        github.event_name == 'workflow_dispatch'
-      )
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      source_sha: ${{ steps.authorize.outputs.source_sha }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          fetch-depth: 0
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
-          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ github.workflow_sha }}
+      - name: Verify the completed CI run and current main ref
+        id: authorize
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          RUN_ID="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["workflow_run"]["id"])' "$GITHUB_EVENT_PATH")"
+          WORKFLOW_RUN="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" --jq '.workflow_id')"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" > workflow-run.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$WORKFLOW_RUN" > workflow.json
+          gh api "repos/$GITHUB_REPOSITORY" > repository.json
+          DEFAULT_BRANCH="$(python -c 'import json; print(json.load(open("repository.json"))["default_branch"])')"
+          gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$DEFAULT_BRANCH" > default-ref.json
+          python -m scripts.authorize_release_event \
+            --event "$GITHUB_EVENT_PATH" \
+            --run workflow-run.json \
+            --workflow workflow.json \
+            --default-ref default-ref.json \
+            --repository repository.json
 
-      - uses: astral-sh/setup-uv@v7
+  prepare:
+    name: Select and build immutable artifacts
+    runs-on: ubuntu-latest
+    needs: authorize
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      source_sha: ${{ needs.authorize.outputs.source_sha }}
+      version: ${{ steps.selected.outputs.version }}
+      part: ${{ steps.selected.outputs.part }}
+      skip: ${{ steps.selected.outputs.skip }}
+      pypi_state: ${{ steps.pypi.outputs.state }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.workflow_sha }}
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ needs.authorize.outputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@3259c6206f993105e3a61b142c2d97bf4b9ef83d # v7.1.0
         with:
           enable-cache: true
-
-      # ── Determine version part ──────────────────────────────
-      - name: Determine version part
-        id: version_part
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - name: Gather immutable source and release evidence
+        id: evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
         run: |
-          # On workflow_run, skip if HEAD is a version bump commit
-          if [ "${{ github.event_name }}" = "workflow_run" ] && git log -1 --pretty=%B | grep -q "\\[skip-version\\]"; then
-            echo "HEAD commit is a version bump ([skip-version] found) — skipping"
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/commits/$SOURCE_SHA/pulls" > associated-pulls.json
+          gh api "repos/$GITHUB_REPOSITORY/commits/$SOURCE_SHA" > source-commit.json
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" > releases.json
+          python - <<'PY' > pypi.json
+          import json
+          from urllib.request import urlopen
+          with urlopen("https://pypi.org/pypi/flask-session.manager.sk/json", timeout=30) as response:
+              print(json.dumps(json.load(response)))
+          PY
+          python -c 'import json; print(json.load(open("source-commit.json"))["commit"]["message"], end="")' > commit-message.txt
+      - name: Check explicit release suppression marker
+        id: marker
+        run: |
+          if grep -Fq '[skip-version]' commit-message.txt; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            PART="${{ github.event.inputs.version_part }}"
           else
-            # workflow_run: query PR labels
-            HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
-            LABELS=$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/pulls" \
-              | jq --arg branch "$DEFAULT_BRANCH" -r \
-                '.[] | select(.base.ref == $branch and .merged_at != null) | .labels[].name' \
-              2>/dev/null || echo "")
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Select release version from exact PR association
+        id: choose
+        if: steps.marker.outputs.skip != 'true'
+        env:
+          SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          python -m scripts.select_release \
+            --source-sha "$SOURCE_SHA" \
+            --pypi-json pypi.json \
+            --branch "$DEFAULT_BRANCH" \
+            --pull-requests associated-pulls.json \
+            --releases releases.json \
+            --commit-message-file commit-message.txt
+          cat "$GITHUB_OUTPUT"
+      - name: Publish selected version as job output
+        id: selected
+        if: always()
+        env:
+          SKIP_VERSION: ${{ steps.marker.outputs.skip }}
+          CHOSEN_VERSION: ${{ steps.choose.outputs.version }}
+          CHOSEN_PART: ${{ steps.choose.outputs.part }}
+        run: |
+          if [ "$SKIP_VERSION" = "true" ]; then
+            echo "version=" >> "$GITHUB_OUTPUT"
+            echo "part=skip" >> "$GITHUB_OUTPUT"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          elif [ -n "$CHOSEN_VERSION" ]; then
+            echo "version=$CHOSEN_VERSION" >> "$GITHUB_OUTPUT"
+            echo "part=$CHOSEN_PART" >> "$GITHUB_OUTPUT"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "No release selection was produced." >&2
+            exit 1
+          fi
+      - name: Build with the reserved release version
+        if: steps.selected.outputs.skip != 'true'
+        env:
+          SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+          VERSION: ${{ steps.selected.outputs.version }}
+        working-directory: source
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          uv sync --frozen --dev
+          export SETUPTOOLS_SCM_PRETEND_VERSION="$VERSION"
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$SOURCE_SHA")"
+          uv build --no-build-isolation --out-dir ../dist
+      - name: Validate package artifacts from the tested source
+        if: steps.selected.outputs.skip != 'true'
+        env:
+          SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+          VERSION: ${{ steps.selected.outputs.version }}
+        run: |
+          python -m scripts.validate_release_artifacts \
+            --dist dist --source-sha "$SOURCE_SHA" --version "$VERSION" \
+            --manifest dist/release-manifest.json
+      - name: Check exact existing PyPI files
+        id: pypi
+        if: steps.selected.outputs.skip != 'true'
+        run: python -m scripts.check_pypi_artifacts --manifest dist/release-manifest.json
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        if: steps.selected.outputs.skip != 'true'
+        with:
+          name: release-${{ steps.selected.outputs.version }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
 
-            if [ -z "$LABELS" ]; then
-              echo "No merged PR targeting $DEFAULT_BRANCH found for $HEAD_SHA — defaulting to patch"
-              PART="patch"
-            elif echo "$LABELS" | grep -qx "$LABEL_MAJOR"; then
-              echo "Found $LABEL_MAJOR label — bumping major"
-              PART="major"
-            elif echo "$LABELS" | grep -qx "$LABEL_MINOR"; then
-              echo "Found $LABEL_MINOR label — bumping minor"
-              PART="minor"
-            else
-              echo "Merged PR found but no $LABEL_MAJOR/$LABEL_MINOR label — defaulting to patch"
-              PART="patch"
+  reserve-release:
+    name: Reserve verified GitHub release
+    runs-on: ubuntu-latest
+    needs: [authorize, prepare]
+    if: needs.prepare.outputs.skip != 'true'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.workflow_sha }}
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: release-${{ needs.prepare.outputs.version }}
+          path: dist
+      - name: Create or verify the draft release reservation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="v$VERSION"
+          gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" > tag-commit.json 2>/dev/null || true
+          if [ -s tag-commit.json ]; then
+            TAG_SHA="$(python -c 'import json; print(json.load(open("tag-commit.json"))["sha"])')"
+            if [ "$TAG_SHA" != "$SOURCE_SHA" ]; then
+              echo "Existing tag $TAG points at $TAG_SHA, expected $SOURCE_SHA" >&2
+              exit 1
             fi
           fi
-          echo "skip=false" >> "$GITHUB_OUTPUT"
-          echo "part=$PART" >> "$GITHUB_OUTPUT"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # ── Sync to latest default branch (deterministic) ───────
-      - name: Sync to latest default branch
-        if: steps.version_part.outputs.skip != 'true'
-        run: |
-          git fetch origin "$DEFAULT_BRANCH"
-          git reset --hard "origin/$DEFAULT_BRANCH"
-
-      # ── Bump version ────────────────────────────────────────
-      - name: Bump version
-        id: bump
-        if: steps.version_part.outputs.skip != 'true'
-        run: |
-          python - <<'PY'
-          import re, os, sys
-          from pathlib import Path
-
-          pyproject = Path("pyproject.toml")
-          text = pyproject.read_text()
-          match = re.search(r'(?m)^version = "(\d+)\.(\d+)\.(\d+)"$', text)
-
-          if not match:
-              print("ERROR: Could not find version = \"X.Y.Z\" in pyproject.toml", file=sys.stderr)
-              sys.exit(1)
-
-          major, minor, patch = map(int, match.groups())
-          part = os.environ["VERSION_PART"]
-
-          if part == "major":
-              major += 1; minor = 0; patch = 0
-          elif part == "minor":
-              minor += 1; patch = 0
-          else:
-              patch += 1
-
-          new = f"{major}.{minor}.{patch}"
-          text = text[:match.start(1)] + new + text[match.end(3):]
-          pyproject.write_text(text)
-
-          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-              f.write(f"new_version={new}\n")
+          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > release.json 2>/dev/null; then
+            python - <<'PY'
+          import json, os, sys
+          release=json.load(open("release.json"))
+          body=release.get("body") or ""
+          expected={f"Release-Source-SHA: {os.environ['SOURCE_SHA']}", f"Package-Version: {os.environ['VERSION']}"}
+          if not expected.issubset(set(body.splitlines())):
+              raise SystemExit("Existing release metadata does not match this source/version")
           PY
-        env:
-          VERSION_PART: ${{ steps.version_part.outputs.part }}
-
-      - name: Rebuild lockfile
-        if: steps.version_part.outputs.skip != 'true'
-        run: uv lock
-
-      # ── Commit + tag + push (before build/publish) ─────────
-      - name: Commit version bump and tag
-        id: commit
-        if: steps.version_part.outputs.skip != 'true'
-        env:
-          NEW_VERSION: ${{ steps.bump.outputs.new_version }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add pyproject.toml uv.lock
-          git commit -m "chore: bump version to ${NEW_VERSION}
-
-          [skip-version]"
-          git tag "v${NEW_VERSION}"
-          git push origin "HEAD:$DEFAULT_BRANCH"
-          git push origin "v${NEW_VERSION}"
-
-      # ── Build + publish ─────────────────────────────────────
-      - if: steps.version_part.outputs.skip != 'true'
-        run: uv build
-
-      - if: steps.version_part.outputs.skip != 'true'
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          skip-existing: true
-
-      # ── GitHub Release ─────────────────────────────────────
-      - name: Create GitHub release
-        if: steps.commit.outcome != 'failure'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NEW_VERSION: ${{ steps.bump.outputs.new_version }}
-        run: |
-          gh release create "v${NEW_VERSION}" \
-            --title "v${NEW_VERSION}" \
-            --generate-notes
-
-  # ═══════════════════════════════════════════════════════════════
-  # Tag push: idempotent — skips if release already exists
-  # ═══════════════════════════════════════════════════════════════
-  publish-existing-tag:
-    name: Publish existing tag
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          ref: ${{ github.ref }}
-
-      - uses: astral-sh/setup-uv@v7
-        with:
-          enable-cache: true
-
-      - run: uv build
-
-      - uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          skip-existing: true
-
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if gh release view "${{ github.ref_name }}" &>/dev/null; then
-            echo "Release ${{ github.ref_name }} already exists — skipping"
+            gh release download "$TAG" --dir existing-release
+            python -m scripts.verify_release_assets \
+              --expected-manifest dist/release-manifest.json \
+              --release-dir existing-release --source-sha "$SOURCE_SHA" --version "$VERSION"
           else
-            gh release create "${{ github.ref_name }}" \
-              --title "${{ github.ref_name }}" \
-              --generate-notes
+            gh api --method POST "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+              -f tag_name="$TAG" -f target_commitish="$SOURCE_SHA" > generated-notes.json
+            python - <<'PY' > release-notes.md
+          import json, os
+          notes=json.load(open("generated-notes.json"))["body"]
+          print(f"Release-Source-SHA: {os.environ['SOURCE_SHA']}")
+          print(f"Package-Version: {os.environ['VERSION']}\n")
+          print(notes)
+          PY
+            if [ -s tag-commit.json ]; then
+              gh release create "$TAG" dist/*.whl dist/*.tar.gz dist/release-manifest.json \
+                --draft --verify-tag --title "$TAG" --notes-file release-notes.md
+            else
+              gh release create "$TAG" dist/*.whl dist/*.tar.gz dist/release-manifest.json \
+                --draft --target "$SOURCE_SHA" --title "$TAG" --notes-file release-notes.md
+            fi
+            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > release.json
+            gh release download "$TAG" --dir existing-release
+            python -m scripts.verify_release_assets \
+              --expected-manifest dist/release-manifest.json \
+              --release-dir existing-release --source-sha "$SOURCE_SHA" --version "$VERSION"
+          fi
+
+  publish-pypi:
+    name: Publish exact artifacts to PyPI
+    runs-on: ubuntu-latest
+    needs: [authorize, prepare, reserve-release]
+    if: needs.prepare.outputs.skip != 'true'
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: release-${{ needs.prepare.outputs.version }}
+          path: dist
+      - name: Recheck source eligibility and artifact hashes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          CURRENT_SHA="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
+          test "$CURRENT_SHA" = "$SOURCE_SHA"
+          python - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          manifest=json.loads(Path("dist/release-manifest.json").read_text())
+          if manifest.get("source_sha") != os.environ["SOURCE_SHA"]:
+              raise SystemExit("artifact source SHA differs from authorized CI")
+          if manifest.get("version") != os.environ["VERSION"]:
+              raise SystemExit("artifact version differs from selected release")
+          for name, expected in manifest["artifacts"].items():
+              actual=hashlib.sha256((Path("dist")/name).read_bytes()).hexdigest()
+              if actual != expected:
+                  raise SystemExit(f"artifact hash mismatch: {name}")
+          PY
+      - name: Stage only wheel and sdist for PyPI
+        run: |
+          mkdir -p packages
+          mv dist/*.whl dist/*.tar.gz packages/
+      - name: Publish only when PyPI has no files for this version
+        if: needs.prepare.outputs.pypi_state == 'publish'
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # release/v1
+        with:
+          packages-dir: packages
+
+  finalize-release:
+    name: Verify PyPI and publish GitHub release
+    runs-on: ubuntu-latest
+    needs: [authorize, prepare, reserve-release, publish-pypi]
+    if: >-
+      needs.prepare.outputs.skip != 'true' &&
+      needs.reserve-release.result == 'success' &&
+      (needs.publish-pypi.result == 'success' || needs.publish-pypi.result == 'skipped')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.workflow_sha }}
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: release-${{ needs.prepare.outputs.version }}
+          path: dist
+      - name: Verify all PyPI files match the candidate build
+        env:
+          ARTIFACT_STATE: ${{ needs.prepare.outputs.pypi_state }}
+          PUBLISH_RESULT: ${{ needs.publish-pypi.result }}
+        run: |
+          python -m scripts.check_pypi_artifacts \
+            --manifest dist/release-manifest.json --output pypi-state.txt
+          grep -q 'state=already-published' pypi-state.txt
+          python -m scripts.check_finalize_policy \
+            --artifact-state "$ARTIFACT_STATE" \
+            --publish-result "$PUBLISH_RESULT" \
+            --reservation-verified
+      - name: Verify draft assets and publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="v$VERSION"
+          gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" > tag-commit.json
+          TAG_SHA="$(python -c 'import json; print(json.load(open("tag-commit.json"))["sha"])')"
+          test "$TAG_SHA" = "$SOURCE_SHA"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > release.json
+          gh release download "$TAG" --dir final-release
+          python -m scripts.verify_release_assets \
+            --expected-manifest dist/release-manifest.json \
+            --release-dir final-release --source-sha "$SOURCE_SHA" --version "$VERSION"
+          RELEASE_ID="$(python -c 'import json; print(json.load(open("release.json"))["id"])')"
+          DRAFT="$(python -c 'import json; print(str(json.load(open("release.json"))["draft"]).lower())')"
+          if [ "$DRAFT" = "true" ]; then
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" -F draft=false > /dev/null
           fi

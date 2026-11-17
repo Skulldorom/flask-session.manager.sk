@@ -113,6 +113,11 @@ def _build_app_and_token(
     def mutate():
         return jsonify(status="mutated")
 
+    @app.route("/protected-mutate", methods=["POST"])
+    @jwt_required()
+    def protected_mutate():
+        return jsonify(status="mutated")
+
     dev_uid = "dev-test"
     with app.app_context():
         raw = create_access_token(identity="user-1")
@@ -371,7 +376,51 @@ def test_cookie_csrf_origin_guard_allows_configured_origin():
     )
 
     assert resp.status_code == 200
-    assert resp.get_json() == {"status": "mutated"}
+
+
+@pytest.mark.parametrize("headers", [{}, {"X-CSRF-TOKEN": "incorrect-csrf"}])
+def test_cookie_authenticated_mutation_rejects_missing_or_incorrect_csrf(headers):
+    app, raw_token, dev_uid, _ = _build_app_and_token()
+    client = _make_client_with_token(app, raw_token)
+    request_headers = {
+        **_auth_headers(dev_uid, origin="http://localhost:3000"),
+        **headers,
+    }
+    if not headers:
+        request_headers.pop("X-CSRF-TOKEN")
+
+    response = client.post("/protected-mutate", headers=request_headers)
+
+    assert response.status_code in (401, 422)
+
+
+def test_invalid_bearer_rejects_request_even_with_a_valid_cookie():
+    app, raw_token, dev_uid, _ = _build_app_and_token(
+        extra_config={"JWT_TOKEN_LOCATION": ["cookies", "headers"]}
+    )
+    client = _make_client_with_token(app, raw_token)
+
+    response = client.get(
+        "/protected",
+        headers={
+            **_auth_headers(dev_uid, origin="http://localhost:3000"),
+            "Authorization": "Bearer definitely-invalid",
+        },
+    )
+
+    assert response.status_code == 455
+
+
+def test_registered_cookie_token_without_device_identifier_is_rejected():
+    app, raw_token, _dev_uid, _ = _build_app_and_token()
+    client = _make_client_with_token(app, raw_token)
+
+    response = client.get(
+        "/protected",
+        headers={"User-Agent": UA, "Origin": "http://localhost:3000"},
+    )
+
+    assert response.status_code == 455
 
 
 def test_cookie_csrf_origin_guard_fails_closed_when_origin_missing():
@@ -610,6 +659,24 @@ def test_expired_partitioned_session_refresh_preserves_partitioned():
         assert "Partitioned" in cookie
     assert "X-CSRF-TOKEN" in resp.headers
     assert "X-CSRF-TOKEN" in resp.headers["Access-Control-Expose-Headers"]
+
+
+def test_expired_cookie_with_failed_refresh_callback_is_rejected():
+    app, raw_token, dev_uid, _ = _build_app_and_token(
+        extra_config={"JWT_ACCESS_TOKEN_EXPIRES": 1},
+        callbacks_overrides={"refresh_user_token": lambda _user, _agent, _device: None},
+    )
+    client = _make_client_with_token(app, raw_token)
+
+    import time
+
+    time.sleep(1.5)
+
+    response = client.get("/protected", headers=_auth_headers(dev_uid))
+
+    assert response.status_code == 455
+    assert response.get_json()["msg"] == "Invalid Token"
+    assert "X-CSRF-TOKEN" not in response.headers
 
 
 def test_expired_token_refresh_rejects_revoked_record():
