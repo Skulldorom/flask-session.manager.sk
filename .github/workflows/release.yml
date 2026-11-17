@@ -21,11 +21,13 @@ jobs:
       actions: read
       contents: read
     outputs:
-      source_sha: ${{ steps.authorize.outputs.source_sha }}
+      source_sha: ${{ steps.recovery.outputs.source_sha }}
+      main_sha: ${{ steps.recovery.outputs.main_sha }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
       - name: Verify the completed CI run and current main ref
         id: authorize
         env:
@@ -45,6 +47,12 @@ jobs:
             --workflow workflow.json \
             --default-ref default-ref.json \
             --repository repository.json
+      - name: Select an authorized interrupted release source
+        id: recovery
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RECOVERY_APP_ID: ${{ vars.RELEASE_RECOVERY_APP_ID }}
+        run: python -m scripts.select_recovery_source
 
   prepare:
     name: Select and build immutable artifacts
@@ -84,7 +92,7 @@ jobs:
           set -euo pipefail
           gh api "repos/$GITHUB_REPOSITORY/commits/$SOURCE_SHA/pulls" > associated-pulls.json
           gh api "repos/$GITHUB_REPOSITORY/commits/$SOURCE_SHA" > source-commit.json
-          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" > releases.json
+          python -m scripts.github_release list > releases.json
           python - <<'PY' > pypi.json
           import json
           from urllib.request import urlopen
@@ -139,6 +147,7 @@ jobs:
         if: steps.selected.outputs.skip != 'true'
         env:
           SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+          MAIN_SHA: ${{ needs.authorize.outputs.main_sha }}
           VERSION: ${{ steps.selected.outputs.version }}
         working-directory: source
         run: |
@@ -151,6 +160,7 @@ jobs:
         if: steps.selected.outputs.skip != 'true'
         env:
           SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+          MAIN_SHA: ${{ needs.authorize.outputs.main_sha }}
           VERSION: ${{ steps.selected.outputs.version }}
         run: |
           python -m scripts.validate_release_artifacts \
@@ -183,113 +193,25 @@ jobs:
         with:
           name: release-${{ needs.prepare.outputs.version }}
           path: dist
+      - name: Mint repository-scoped recovery token
+        if: needs.authorize.outputs.source_sha != needs.authorize.outputs.main_sha
+        id: recovery-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
+        with:
+          app-id: ${{ vars.RELEASE_RECOVERY_APP_ID }}
+          private-key: ${{ secrets.RELEASE_RECOVERY_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-workflows: write
       - name: Create or verify the draft release reservation
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.recovery-token.outputs.token || github.token }}
           SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+          MAIN_SHA: ${{ needs.authorize.outputs.main_sha }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          set -euo pipefail
-          TAG="v$VERSION"
-          lookup_api() {
-            local endpoint="$1" response_file="$2" output_file="$3" allow_not_found="${4:-false}"
-            local gh_exit=0
-            if gh api --include "$endpoint" > "$response_file"; then
-              :
-            else
-              gh_exit=$?
-            fi
-            local args=(--response "$response_file" --output "$output_file" --gh-exit-code "$gh_exit")
-            if [ "$allow_not_found" = "true" ]; then
-              args+=(--allow-not-found)
-            fi
-            python -m scripts.parse_gh_response "${args[@]}"
-          }
-          lookup_api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" tag-ref-response.txt tag-ref.json true
-          TAG_FOUND="$(python -c 'import json; print(str(json.load(open("tag-ref.json")).get("found", True)).lower())')"
-          if [ "$TAG_FOUND" = "true" ]; then
-            TAG_SHA="$(python -m scripts.resolve_tag_ref --ref-file tag-ref.json --tag "$TAG" --repository "$GITHUB_REPOSITORY")"
-            if [ "$TAG_SHA" != "$SOURCE_SHA" ]; then
-              echo "Existing tag $TAG points at $TAG_SHA, expected $SOURCE_SHA" >&2
-              exit 1
-            fi
-          fi
-          lookup_api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" release-response.txt release.json true
-          RELEASE_FOUND="$(python -c 'import json; print(str(json.load(open("release.json")).get("found", True)).lower())')"
-          if [ "$RELEASE_FOUND" = "true" ]; then
-            python - <<'PY'
-          import json, os
-          release=json.load(open("release.json"))
-          body=release.get("body") or ""
-          expected={f"Release-Source-SHA: {os.environ['SOURCE_SHA']}", f"Package-Version: {os.environ['VERSION']}"}
-          if not expected.issubset(set(body.splitlines())):
-              raise SystemExit("Existing release metadata does not match this source/version")
-          PY
-            if [ "$TAG_FOUND" != "true" ]; then
-              echo "GitHub Release exists but its tag does not resolve to the authorized source." >&2
-              exit 1
-            fi
-            RELEASE_ID="$(python -c 'import json; print(json.load(open("release.json"))["id"])')"
-            RELEASE_DRAFT="$(python -c 'import json; print(str(json.load(open("release.json"))["draft"]).lower())')"
-            gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" > release-assets.json
-            mkdir -p existing-release
-            ASSET_COUNT="$(python -c 'import json; print(len(json.load(open("release-assets.json"))))')"
-            if [ "$ASSET_COUNT" -gt 0 ]; then
-              gh release download "$TAG" --dir existing-release
-            fi
-            if [ "$RELEASE_DRAFT" = "true" ]; then
-              python -m scripts.reconcile_release_assets \
-                --manifest dist/release-manifest.json \
-                --release-dir existing-release --missing-output missing-assets.txt
-              missing_paths=()
-              while IFS= read -r asset; do
-                [ -n "$asset" ] || continue
-                case "$asset" in */*|*..*) echo "Unsafe release asset name" >&2; exit 1 ;; esac
-                missing_paths+=("dist/$asset")
-              done < missing-assets.txt
-              if [ "${#missing_paths[@]}" -gt 0 ]; then
-                gh release upload "$TAG" "${missing_paths[@]}"
-              fi
-            fi
-            rm -rf verified-release
-            gh release download "$TAG" --dir verified-release
-            python -m scripts.verify_release_assets \
-              --expected-manifest dist/release-manifest.json \
-              --release-dir verified-release --source-sha "$SOURCE_SHA" --version "$VERSION"
-          else
-            gh api --method POST "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
-              -f tag_name="$TAG" -f target_commitish="$SOURCE_SHA" > generated-notes.json
-            python - <<'PY' > release-notes.md
-          import json, os
-          notes=json.load(open("generated-notes.json"))["body"]
-          print(f"Release-Source-SHA: {os.environ['SOURCE_SHA']}")
-          print(f"Package-Version: {os.environ['VERSION']}\n")
-          print(notes)
-          PY
-            if [ "$TAG_FOUND" = "true" ]; then
-              gh release create "$TAG" dist/*.whl dist/*.tar.gz dist/release-manifest.json \
-                --draft --verify-tag --title "$TAG" --notes-file release-notes.md
-            else
-              gh release create "$TAG" dist/*.whl dist/*.tar.gz dist/release-manifest.json \
-                --draft --target "$SOURCE_SHA" --title "$TAG" --notes-file release-notes.md
-            fi
-            lookup_api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" tag-ref-response.txt tag-ref.json
-            TAG_SHA="$(python -m scripts.resolve_tag_ref --ref-file tag-ref.json --tag "$TAG" --repository "$GITHUB_REPOSITORY")"
-            test "$TAG_SHA" = "$SOURCE_SHA"
-            lookup_api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" release-response.txt release.json
-            python - <<'PY'
-          import json, os
-          release=json.load(open("release.json"))
-          body=release.get("body") or ""
-          expected={f"Release-Source-SHA: {os.environ['SOURCE_SHA']}", f"Package-Version: {os.environ['VERSION']}"}
-          if not expected.issubset(set(body.splitlines())) or not release.get("draft"):
-              raise SystemExit("New release reservation has invalid metadata or is not a draft")
-          PY
-            gh release download "$TAG" --dir verified-release
-            python -m scripts.verify_release_assets \
-              --expected-manifest dist/release-manifest.json \
-              --release-dir verified-release --source-sha "$SOURCE_SHA" --version "$VERSION"
-          fi
+          python -m scripts.github_release reserve
 
   publish-pypi:
     name: Publish exact artifacts to PyPI
@@ -312,11 +234,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+          MAIN_SHA: ${{ needs.authorize.outputs.main_sha }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
           CURRENT_SHA="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
-          test "$CURRENT_SHA" = "$SOURCE_SHA"
+          test "$CURRENT_SHA" = "$MAIN_SHA"
           python - <<'PY'
           import hashlib, json, os
           from pathlib import Path
@@ -366,35 +289,22 @@ jobs:
             --artifact-state "$ARTIFACT_STATE" \
             --publish-result "$PUBLISH_RESULT" \
             --reservation-verified
+      - name: Mint repository-scoped recovery token
+        if: needs.authorize.outputs.source_sha != needs.authorize.outputs.main_sha
+        id: recovery-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
+        with:
+          app-id: ${{ vars.RELEASE_RECOVERY_APP_ID }}
+          private-key: ${{ secrets.RELEASE_RECOVERY_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-workflows: write
       - name: Verify draft assets and publish the release
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.recovery-token.outputs.token || github.token }}
           SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+          MAIN_SHA: ${{ needs.authorize.outputs.main_sha }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          set -euo pipefail
-          TAG="v$VERSION"
-          lookup_api() {
-            local endpoint="$1" response_file="$2" output_file="$3"
-            local gh_exit=0
-            if gh api --include "$endpoint" > "$response_file"; then
-              :
-            else
-              gh_exit=$?
-            fi
-            python -m scripts.parse_gh_response \
-              --response "$response_file" --output "$output_file" --gh-exit-code "$gh_exit"
-          }
-          lookup_api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" tag-ref-response.txt tag-ref.json
-          TAG_SHA="$(python -m scripts.resolve_tag_ref --ref-file tag-ref.json --tag "$TAG" --repository "$GITHUB_REPOSITORY")"
-          test "$TAG_SHA" = "$SOURCE_SHA"
-          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > release.json
-          gh release download "$TAG" --dir final-release
-          python -m scripts.verify_release_assets \
-            --expected-manifest dist/release-manifest.json \
-            --release-dir final-release --source-sha "$SOURCE_SHA" --version "$VERSION"
-          RELEASE_ID="$(python -c 'import json; print(json.load(open("release.json"))["id"])')"
-          DRAFT="$(python -c 'import json; print(str(json.load(open("release.json"))["draft"]).lower())')"
-          if [ "$DRAFT" = "true" ]; then
-            gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" -F draft=false > /dev/null
-          fi
+          python -m scripts.github_release finalize

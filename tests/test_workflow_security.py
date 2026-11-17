@@ -21,10 +21,20 @@ def assert_authenticated_github_steps(workflow: dict) -> None:
         job_env = job.get("env", {})
         for index, step in enumerate(job.get("steps", [])):
             run = step.get("run", "")
-            if not AUTHENTICATED_GH.search(run):
+            if not (
+                AUTHENTICATED_GH.search(run)
+                or "scripts.github_release" in run
+                or "scripts.select_recovery_source" in run
+            ):
                 continue
             step_env = {**job_env, **step.get("env", {})}
-            assert step_env.get("GH_TOKEN") == TOKEN, (
+            expected = TOKEN
+            if step.get("name") in {
+                "Create or verify the draft release reservation",
+                "Verify draft assets and publish the release",
+            }:
+                expected = "${{ steps.recovery-token.outputs.token || github.token }}"
+            assert step_env.get("GH_TOKEN") == expected, (
                 f"{job_id} step {index} invokes authenticated GitHub CLI "
                 "without the read-scoped Actions token"
             )
@@ -142,3 +152,19 @@ def test_expanded_ci_gates_run_on_pull_requests_without_path_filters():
     assert "paths" not in str(workflow["on"])
     for job_id in ("release-policy", "dependency-audit", "companion-compatibility"):
         assert job_id in workflow["jobs"]
+
+
+def test_recovery_app_is_scoped_and_unavailable_to_pypi_and_pr_events():
+    workflow = load_workflow(".github/workflows/release.yml")
+    jobs = workflow["jobs"]
+    for job_id in ("reserve-release", "finalize-release"):
+        step = next(s for s in jobs[job_id]["steps"] if s.get("id") == "recovery-token")
+        assert step["if"] == (
+            "needs.authorize.outputs.source_sha != needs.authorize.outputs.main_sha"
+        )
+        assert step["with"]["repositories"] == "${{ github.event.repository.name }}"
+        assert step["with"]["permission-contents"] == "write"
+        assert step["with"]["permission-workflows"] == "write"
+        assert "skip-token-revoke" not in step["with"]
+    assert "RECOVERY_APP" not in str(jobs["publish-pypi"])
+    assert set(workflow["on"]) == {"workflow_run"}
