@@ -80,6 +80,7 @@ from pathlib import Path
 state_path=Path(os.environ['MOCK_GH_STATE'])
 state=json.loads(state_path.read_text()) if state_path.exists() else {
   'tag_sha': None, 'release': None, 'assets': {}, 'create_count': 0, 'upload_count': 0,
+  'api_endpoints': [],
   'patch_fails': False
 }
 args=sys.argv[1:]
@@ -104,6 +105,8 @@ if args[0]=='api':
   method='GET'
   if '--method' in args: method=args[args.index('--method')+1]
   endpoint=next((arg for arg in args if arg.startswith('repos/')), '')
+  state.setdefault('api_endpoints', []).append(endpoint)
+  save()
   if method=='PATCH' and '/releases/' in endpoint:
     if state.get('patch_fails'):
       response(500, {'message':'simulated update failure'}, included)
@@ -112,12 +115,23 @@ if args[0]=='api':
     save(); sys.exit(response(200, state.get('release') or {}, included))
   if method=='POST' and endpoint.endswith('/releases/generate-notes'):
     sys.exit(response(200, {'body':'Generated notes'}, included))
-  if '/commits/v' in endpoint:
-    if state.get('tag_lookup_status') == 500:
-      sys.exit(response(500, {'message':'simulated server error'}, included))
+  if '/git/ref/tags/' in endpoint:
+    if state.get('tag_lookup_status'):
+      status=state['tag_lookup_status']
+      sys.exit(response(status, {'message':'simulated tag lookup error'}, included))
     if state.get('tag_sha'):
-      sys.exit(response(200, {'sha':state['tag_sha']}, included))
+      object_type=state.get('tag_object_type', 'commit')
+      object_sha='d'*40 if object_type == 'tag' else state['tag_sha']
+      ref={'ref':'refs/'+endpoint.split('/git/ref/',1)[1],
+        'object':{'sha':object_sha,'type':object_type}}
+      sys.exit(response(200, ref, included))
     sys.exit(response(404, {'message':'Not Found'}, included))
+  if '/git/tags/' in endpoint:
+    tag_sha=endpoint.rsplit('/',1)[1]
+    if tag_sha != 'd'*40 or not state.get('tag_sha'):
+      sys.exit(response(404, {'message':'Not Found'}, included))
+    value={'object':{'sha':state['tag_sha'],'type':'commit'}}
+    sys.exit(response(200, value, included))
   if '/releases/tags/' in endpoint:
     if state.get('release'):
       sys.exit(response(200, state['release'], included))
@@ -131,6 +145,7 @@ if args[0]=='release' and len(args)>1 and args[1]=='create':
     print('release already exists', file=sys.stderr); sys.exit(1)
   notes=Path(args[args.index('--notes-file')+1]).read_text()
   state['tag_sha']=os.environ['SOURCE_SHA']
+  state['tag_object_type']='commit'
   state['release']={'id':17,'tag_name':tag,'body':notes,'draft':True}
   state['create_count']+=1
   asset_suffixes=('.whl','.tar.gz','release-manifest.json')
@@ -442,6 +457,11 @@ def test_draft_release_creation_and_duplicate_retry_are_idempotent(tmp_path):
     assert state["create_count"] == 1
     assert state["release"]["draft"] is True
     assert len(state["assets"]) == 3
+    assert (
+        "repos/Skulldorom/flask-session.manager.sk/git/ref/tags/v1.3.3"
+        in state["api_endpoints"]
+    )
+    assert not any("/commits/v1.3.3" in endpoint for endpoint in state["api_endpoints"])
 
     duplicate, retried_state = run_workflow_step(script, tmp_path)
     assert duplicate.returncode == 0, duplicate.stderr
@@ -479,6 +499,7 @@ def test_conflicting_draft_asset_is_never_overwritten(tmp_path):
     tampered.write_bytes(source.read_bytes() + b"wrong")
     state = {
         "tag_sha": SOURCE_SHA,
+        "tag_object_type": "tag",
         "release": {
             "id": 17,
             "tag_name": f"v{VERSION}",
@@ -504,7 +525,7 @@ def test_github_lookup_server_error_is_not_treated_as_missing_tag(tmp_path):
     release_fixture(tmp_path)
     state = {
         "tag_sha": None,
-        "tag_lookup_status": 500,
+        "tag_lookup_status": 422,
         "release": None,
         "assets": {},
         "create_count": 0,
@@ -517,7 +538,7 @@ def test_github_lookup_server_error_is_not_treated_as_missing_tag(tmp_path):
 
     failed, final_state = run_workflow_step(script, tmp_path, state=state)
     assert failed.returncode != 0
-    assert "HTTP 500" in failed.stderr
+    assert "HTTP 422" in failed.stderr
     assert final_state["create_count"] == 0
 
 
@@ -531,6 +552,7 @@ def test_github_release_finalization_failure_leaves_draft_unpublished(tmp_path):
         assets[name] = str(asset_store / name)
     state = {
         "tag_sha": SOURCE_SHA,
+        "tag_object_type": "commit",
         "release": {
             "id": 17,
             "tag_name": f"v{VERSION}",
