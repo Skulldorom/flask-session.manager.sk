@@ -191,27 +191,71 @@ jobs:
         run: |
           set -euo pipefail
           TAG="v$VERSION"
-          gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" > tag-commit.json 2>/dev/null || true
-          if [ -s tag-commit.json ]; then
+          lookup_api() {
+            local endpoint="$1" response_file="$2" output_file="$3" allow_not_found="${4:-false}"
+            local gh_exit=0
+            if gh api --include "$endpoint" > "$response_file"; then
+              :
+            else
+              gh_exit=$?
+            fi
+            local args=(--response "$response_file" --output "$output_file" --gh-exit-code "$gh_exit")
+            if [ "$allow_not_found" = "true" ]; then
+              args+=(--allow-not-found)
+            fi
+            python -m scripts.parse_gh_response "${args[@]}"
+          }
+          lookup_api "repos/$GITHUB_REPOSITORY/commits/$TAG" tag-response.txt tag-commit.json true
+          TAG_FOUND="$(python -c 'import json; print(str(json.load(open("tag-commit.json")).get("found", True)).lower())')"
+          if [ "$TAG_FOUND" = "true" ]; then
             TAG_SHA="$(python -c 'import json; print(json.load(open("tag-commit.json"))["sha"])')"
             if [ "$TAG_SHA" != "$SOURCE_SHA" ]; then
               echo "Existing tag $TAG points at $TAG_SHA, expected $SOURCE_SHA" >&2
               exit 1
             fi
           fi
-          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > release.json 2>/dev/null; then
+          lookup_api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" release-response.txt release.json true
+          RELEASE_FOUND="$(python -c 'import json; print(str(json.load(open("release.json")).get("found", True)).lower())')"
+          if [ "$RELEASE_FOUND" = "true" ]; then
             python - <<'PY'
-          import json, os, sys
+          import json, os
           release=json.load(open("release.json"))
           body=release.get("body") or ""
           expected={f"Release-Source-SHA: {os.environ['SOURCE_SHA']}", f"Package-Version: {os.environ['VERSION']}"}
           if not expected.issubset(set(body.splitlines())):
               raise SystemExit("Existing release metadata does not match this source/version")
           PY
-            gh release download "$TAG" --dir existing-release
+            if [ "$TAG_FOUND" != "true" ]; then
+              echo "GitHub Release exists but its tag does not resolve to the authorized source." >&2
+              exit 1
+            fi
+            RELEASE_ID="$(python -c 'import json; print(json.load(open("release.json"))["id"])')"
+            RELEASE_DRAFT="$(python -c 'import json; print(str(json.load(open("release.json"))["draft"]).lower())')"
+            gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" > release-assets.json
+            mkdir -p existing-release
+            ASSET_COUNT="$(python -c 'import json; print(len(json.load(open("release-assets.json"))))')"
+            if [ "$ASSET_COUNT" -gt 0 ]; then
+              gh release download "$TAG" --dir existing-release
+            fi
+            if [ "$RELEASE_DRAFT" = "true" ]; then
+              python -m scripts.reconcile_release_assets \
+                --manifest dist/release-manifest.json \
+                --release-dir existing-release --missing-output missing-assets.txt
+              missing_paths=()
+              while IFS= read -r asset; do
+                [ -n "$asset" ] || continue
+                case "$asset" in */*|*..*) echo "Unsafe release asset name" >&2; exit 1 ;; esac
+                missing_paths+=("dist/$asset")
+              done < missing-assets.txt
+              if [ "${#missing_paths[@]}" -gt 0 ]; then
+                gh release upload "$TAG" "${missing_paths[@]}"
+              fi
+            fi
+            rm -rf verified-release
+            gh release download "$TAG" --dir verified-release
             python -m scripts.verify_release_assets \
               --expected-manifest dist/release-manifest.json \
-              --release-dir existing-release --source-sha "$SOURCE_SHA" --version "$VERSION"
+              --release-dir verified-release --source-sha "$SOURCE_SHA" --version "$VERSION"
           else
             gh api --method POST "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
               -f tag_name="$TAG" -f target_commitish="$SOURCE_SHA" > generated-notes.json
@@ -229,11 +273,22 @@ jobs:
               gh release create "$TAG" dist/*.whl dist/*.tar.gz dist/release-manifest.json \
                 --draft --target "$SOURCE_SHA" --title "$TAG" --notes-file release-notes.md
             fi
-            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > release.json
-            gh release download "$TAG" --dir existing-release
+            lookup_api "repos/$GITHUB_REPOSITORY/commits/$TAG" tag-response.txt tag-commit.json
+            TAG_SHA="$(python -c 'import json; print(json.load(open("tag-commit.json"))["sha"])')"
+            test "$TAG_SHA" = "$SOURCE_SHA"
+            lookup_api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" release-response.txt release.json
+            python - <<'PY'
+          import json, os
+          release=json.load(open("release.json"))
+          body=release.get("body") or ""
+          expected={f"Release-Source-SHA: {os.environ['SOURCE_SHA']}", f"Package-Version: {os.environ['VERSION']}"}
+          if not expected.issubset(set(body.splitlines())) or not release.get("draft"):
+              raise SystemExit("New release reservation has invalid metadata or is not a draft")
+          PY
+            gh release download "$TAG" --dir verified-release
             python -m scripts.verify_release_assets \
               --expected-manifest dist/release-manifest.json \
-              --release-dir existing-release --source-sha "$SOURCE_SHA" --version "$VERSION"
+              --release-dir verified-release --source-sha "$SOURCE_SHA" --version "$VERSION"
           fi
 
   publish-pypi:
@@ -249,6 +304,10 @@ jobs:
         with:
           name: release-${{ needs.prepare.outputs.version }}
           path: dist
+      - name: Stage only wheel and sdist for PyPI
+        run: |
+          mkdir -p packages
+          mv dist/*.whl dist/*.tar.gz packages/
       - name: Recheck source eligibility and artifact hashes
         env:
           GH_TOKEN: ${{ github.token }}
@@ -267,14 +326,10 @@ jobs:
           if manifest.get("version") != os.environ["VERSION"]:
               raise SystemExit("artifact version differs from selected release")
           for name, expected in manifest["artifacts"].items():
-              actual=hashlib.sha256((Path("dist")/name).read_bytes()).hexdigest()
+              actual=hashlib.sha256((Path("packages")/name).read_bytes()).hexdigest()
               if actual != expected:
                   raise SystemExit(f"artifact hash mismatch: {name}")
           PY
-      - name: Stage only wheel and sdist for PyPI
-        run: |
-          mkdir -p packages
-          mv dist/*.whl dist/*.tar.gz packages/
       - name: Publish only when PyPI has no files for this version
         if: needs.prepare.outputs.pypi_state == 'publish'
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # release/v1

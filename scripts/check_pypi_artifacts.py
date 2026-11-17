@@ -16,6 +16,11 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument(
+        "--pypi-json",
+        type=Path,
+        help=("Use a local PyPI version JSON fixture instead of a network request."),
+    )
+    parser.add_argument(
         "--output", type=Path, default=Path(os.environ.get("GITHUB_OUTPUT", ""))
     )
     args = parser.parse_args()
@@ -23,13 +28,16 @@ def main() -> None:
     version_url = (
         f"https://pypi.org/pypi/flask-session.manager.sk/{manifest['version']}/json"
     )
-    try:
-        with urlopen(version_url, timeout=20) as response:
-            release = json.load(response)
-    except HTTPError as error:
-        if error.code != 404:
-            raise
-        release = None
+    if args.pypi_json:
+        release = json.loads(args.pypi_json.read_text())
+    else:
+        try:
+            with urlopen(version_url, timeout=20) as response:
+                release = json.load(response)
+        except HTTPError as error:
+            if error.code != 404:
+                raise
+            release = None
     existing = {}
     if release is not None:
         existing = {
