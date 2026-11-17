@@ -205,10 +205,10 @@ jobs:
             fi
             python -m scripts.parse_gh_response "${args[@]}"
           }
-          lookup_api "repos/$GITHUB_REPOSITORY/commits/$TAG" tag-response.txt tag-commit.json true
-          TAG_FOUND="$(python -c 'import json; print(str(json.load(open("tag-commit.json")).get("found", True)).lower())')"
+          lookup_api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" tag-ref-response.txt tag-ref.json true
+          TAG_FOUND="$(python -c 'import json; print(str(json.load(open("tag-ref.json")).get("found", True)).lower())')"
           if [ "$TAG_FOUND" = "true" ]; then
-            TAG_SHA="$(python -c 'import json; print(json.load(open("tag-commit.json"))["sha"])')"
+            TAG_SHA="$(python -m scripts.resolve_tag_ref --ref-file tag-ref.json --tag "$TAG" --repository "$GITHUB_REPOSITORY")"
             if [ "$TAG_SHA" != "$SOURCE_SHA" ]; then
               echo "Existing tag $TAG points at $TAG_SHA, expected $SOURCE_SHA" >&2
               exit 1
@@ -266,15 +266,15 @@ jobs:
           print(f"Package-Version: {os.environ['VERSION']}\n")
           print(notes)
           PY
-            if [ -s tag-commit.json ]; then
+            if [ "$TAG_FOUND" = "true" ]; then
               gh release create "$TAG" dist/*.whl dist/*.tar.gz dist/release-manifest.json \
                 --draft --verify-tag --title "$TAG" --notes-file release-notes.md
             else
               gh release create "$TAG" dist/*.whl dist/*.tar.gz dist/release-manifest.json \
                 --draft --target "$SOURCE_SHA" --title "$TAG" --notes-file release-notes.md
             fi
-            lookup_api "repos/$GITHUB_REPOSITORY/commits/$TAG" tag-response.txt tag-commit.json
-            TAG_SHA="$(python -c 'import json; print(json.load(open("tag-commit.json"))["sha"])')"
+            lookup_api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" tag-ref-response.txt tag-ref.json
+            TAG_SHA="$(python -m scripts.resolve_tag_ref --ref-file tag-ref.json --tag "$TAG" --repository "$GITHUB_REPOSITORY")"
             test "$TAG_SHA" = "$SOURCE_SHA"
             lookup_api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" release-response.txt release.json
             python - <<'PY'
@@ -374,8 +374,19 @@ jobs:
         run: |
           set -euo pipefail
           TAG="v$VERSION"
-          gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" > tag-commit.json
-          TAG_SHA="$(python -c 'import json; print(json.load(open("tag-commit.json"))["sha"])')"
+          lookup_api() {
+            local endpoint="$1" response_file="$2" output_file="$3"
+            local gh_exit=0
+            if gh api --include "$endpoint" > "$response_file"; then
+              :
+            else
+              gh_exit=$?
+            fi
+            python -m scripts.parse_gh_response \
+              --response "$response_file" --output "$output_file" --gh-exit-code "$gh_exit"
+          }
+          lookup_api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" tag-ref-response.txt tag-ref.json
+          TAG_SHA="$(python -m scripts.resolve_tag_ref --ref-file tag-ref.json --tag "$TAG" --repository "$GITHUB_REPOSITORY")"
           test "$TAG_SHA" = "$SOURCE_SHA"
           gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > release.json
           gh release download "$TAG" --dir final-release
