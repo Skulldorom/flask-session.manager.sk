@@ -22,7 +22,7 @@ classifiers = [
 dynamic = ["urls", "version"]
 
 [build-system]
-requires = ["hatchling==1.27.0", "hatch-vcs==0.5.0", "setuptools-scm==9.2.2"]
+requires = ["hatchling==1.33.0", "hatch-vcs==0.5.0", "setuptools-scm==9.2.2"]
 build-backend = "hatchling.build"
 
 [tool.hatch.version]
@@ -42,7 +42,7 @@ Issues = "https://github.com/Skulldorom/flask-session.manager.sk/issues"
 [dependency-groups]
 dev = [
     "hatch-vcs==0.5.0",
-    "hatchling==1.27.0",
+    "hatchling==1.33.0",
     "pytest>=9",
     "pyyaml==6.0.3",
     "ruff>=0.14",
