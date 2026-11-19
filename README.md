@@ -1,7 +1,9 @@
 # flask-session.manager.sk
 
+
 [![Version](https://img.shields.io/github/v/tag/Skulldorom/flask-session.manager.sk)](https://github.com/Skulldorom/flask-session.manager.sk/tags)
 [![Python](https://img.shields.io/pypi/pyversions/flask-session.manager.sk)](https://pypi.org/project/flask-session.manager.sk/)
+[![CI](https://github.com/Skulldorom/flask-session.manager.sk/actions/workflows/ci.yml/badge.svg)](https://github.com/Skulldorom/flask-session.manager.sk/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 
 <p align="center">
