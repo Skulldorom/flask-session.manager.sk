@@ -21,12 +21,7 @@ def assert_authenticated_github_steps(workflow: dict) -> None:
         job_env = job.get("env", {})
         for index, step in enumerate(job.get("steps", [])):
             run = step.get("run", "")
-            if not (
-                AUTHENTICATED_GH.search(run)
-                or "scripts.github_release" in run
-                or "scripts.select_recovery_source" in run
-                or "scripts.release_recovery" in run
-            ):
+            if not (AUTHENTICATED_GH.search(run) or "scripts.github_release" in run):
                 continue
             step_env = {**job_env, **step.get("env", {})}
             expected = TOKEN
@@ -42,7 +37,7 @@ def test_release_workflow_has_only_the_verified_ci_event_trigger():
     workflow = load_workflow(".github/workflows/release.yml")
     triggers = workflow["on"]
 
-    assert set(triggers) == {"workflow_run", "workflow_dispatch"}
+    assert set(triggers) == {"workflow_run"}
     assert workflow["jobs"]["authorize"]["if"] == "github.event_name == 'workflow_run'"
     assert triggers["workflow_run"]["workflows"] == ["CI"]
     assert triggers["workflow_run"]["branches"] == ["main"]
@@ -77,7 +72,7 @@ def test_only_pypi_publisher_has_oidc_and_pypi_upload_capability():
 
     assert publish["permissions"] == {"contents": "read", "id-token": "write"}
     for job_id, job in jobs.items():
-        if job_id not in {"publish-pypi", "recover-v1-3-3"}:
+        if job_id != "publish-pypi":
             assert job.get("permissions", {}).get("id-token") != "write"
             assert all(
                 "pypa/gh-action-pypi-publish" not in step.get("uses", "")
@@ -90,7 +85,7 @@ def test_only_pypi_publisher_has_oidc_and_pypi_upload_capability():
         for step in job.get("steps", [])
         if "pypa/gh-action-pypi-publish" in step.get("uses", "")
     ]
-    assert publishers == ["publish-pypi", "recover-v1-3-3"]
+    assert publishers == ["publish-pypi"]
     assert "environment" not in publish
     for job_id, job in jobs.items():
         if job_id == "publish-pypi":
@@ -116,21 +111,31 @@ def test_release_jobs_have_explicit_permissions_and_correct_dag():
     }
     assert jobs["publish-pypi"]["permissions"]["contents"] == "read"
     assert jobs["reserve-release"]["permissions"] == {"contents": "write"}
+    assert jobs["upload-release-assets"]["permissions"] == {"contents": "write"}
     assert jobs["finalize-release"]["permissions"] == {"contents": "write"}
     assert jobs["reserve-release"]["needs"] == ["authorize", "prepare"]
-    assert jobs["publish-pypi"]["needs"] == [
+    assert jobs["upload-release-assets"]["needs"] == [
         "authorize",
         "prepare",
         "reserve-release",
+    ]
+    assert jobs["publish-pypi"]["needs"] == [
+        "authorize",
+        "prepare",
+        "upload-release-assets",
     ]
     assert jobs["finalize-release"]["needs"] == [
         "authorize",
         "prepare",
         "reserve-release",
+        "upload-release-assets",
         "publish-pypi",
     ]
     assert "needs.prepare.outputs.skip != 'true'" in jobs["publish-pypi"]["if"]
-    assert "needs.reserve-release.result == 'success'" in jobs["finalize-release"]["if"]
+    assert (
+        "needs.upload-release-assets.result == 'success'"
+        in jobs["finalize-release"]["if"]
+    )
 
 
 def test_actions_are_pinned_to_full_commit_shas():
@@ -149,35 +154,17 @@ def test_expanded_ci_gates_run_on_pull_requests_without_path_filters():
     assert "paths" not in str(workflow["on"])
     for job_id in ("release-policy", "dependency-audit", "companion-compatibility"):
         assert job_id in workflow["jobs"]
-    # The executable historical handoff verifies the real source ancestry.
+    # VCS version inference and builds use the full tag history.
     for job_id in ("test", "release-policy"):
         assert workflow["jobs"][job_id]["steps"][0]["with"]["fetch-depth"] == "0"
 
 
-def test_recovery_has_no_elevated_credentials_or_generic_publication_bypass():
+def test_abandoned_release_recovery_cannot_be_manually_dispatched():
     workflow = load_workflow(".github/workflows/release.yml")
-    jobs = workflow["jobs"]
-    recovery = jobs["recover-v1-3-3"]
-    assert recovery["if"] == "github.event_name == 'workflow_dispatch'"
-    assert recovery["permissions"] == {
-        "contents": "read",
-        "actions": "read",
-        "id-token": "write",
-    }
+    assert set(workflow["on"]) == {"workflow_run"}
+    assert "recover-v1-3-3" not in workflow["jobs"]
     raw = (ROOT / ".github/workflows/release.yml").read_text()
-    assert "secrets." not in raw
+    assert "workflow_dispatch" not in raw
+    assert "scripts.release_recovery" not in raw
     assert "create-github-app-token" not in raw
-    assert "RECOVERY_APP" not in raw
-    assert "workflow-authorize" in recovery["steps"][1]["run"]
-    runs = [step.get("run", "") for step in recovery["steps"]]
-    assert any("workflow-verify" in run for run in runs)
-    assert any("workflow-finish" in run for run in runs)
-    assert not any("github_release reserve" in run or "finalize" in run for run in runs)
-    assert set(workflow["on"]["workflow_dispatch"]["inputs"]) == {
-        "repository",
-        "version",
-        "source_sha",
-        "release_id",
-        "main_sha",
-        "confirmation",
-    }
+    assert "secrets." not in raw

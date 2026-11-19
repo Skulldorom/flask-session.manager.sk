@@ -83,6 +83,8 @@ def run_workflow_step(
     tmp_path: Path,
     *,
     partial_create: bool = False,
+    hide_created_draft: bool = False,
+    release_id: str = "",
     state: dict | None = None,
 ) -> tuple[subprocess.CompletedProcess, dict]:
     state_path = tmp_path / "gh-state.json"
@@ -96,6 +98,9 @@ def run_workflow_step(
             "PYTHONPATH": str(ROOT),
             "GITHUB_REPOSITORY": REPOSITORY,
             "GH_TOKEN": "test-only-read-write-token",
+            "GITHUB_OUTPUT": str(tmp_path / "gh-output"),
+            "RELEASE_ID": release_id,
+            "MOCK_GH_HIDE_CREATED_DRAFT": str(int(hide_created_draft)),
             "SOURCE_SHA": SOURCE_SHA,
             "VERSION": VERSION,
             "MOCK_GH_STATE": str(state_path),
@@ -180,6 +185,8 @@ def test_release_selection_cli_covers_labels_conflicts_ambiguity_and_retry(tmp_p
     pypi = write_json(tmp_path / "pypi.json", {"info": {"version": "1.3.2"}})
     prs = write_json(tmp_path / "prs.json", [merged_pr])
     releases = write_json(tmp_path / "releases.json", [])
+    tags = tmp_path / "tag-refs.txt"
+    tags.touch()
     commit = tmp_path / "message.txt"
     commit.write_text("feat: release capability\n")
     output = tmp_path / "selection.txt"
@@ -194,6 +201,8 @@ def test_release_selection_cli_covers_labels_conflicts_ambiguity_and_retry(tmp_p
         prs,
         "--releases",
         releases,
+        "--tag-refs",
+        tags,
         "--commit-message-file",
         commit,
         "--output",
@@ -227,6 +236,60 @@ def test_release_selection_cli_covers_labels_conflicts_ambiguity_and_retry(tmp_p
     assert retry.returncode == 0, retry.stderr
     assert "version=1.3.3" in output.read_text()
     assert "part=reserved-release" in output.read_text()
+
+
+@pytest.mark.parametrize(
+    "draft, tag_target, latest, expected",
+    [
+        (False, None, "1.3.2", "1.3.3"),
+        (True, "old", "1.3.2", "1.3.4"),
+        (True, None, "1.3.2", "1.3.4"),
+        (False, "old", "1.3.2", "1.3.4"),
+        (False, "annotated-old", "1.3.2", "1.3.4"),
+        (False, "current", "1.3.2", "1.3.3"),
+        (False, "annotated-current", "1.3.2", "1.3.3"),
+        (True, "old", "1.3.3", "1.3.4"),
+    ],
+)
+def test_workflow_selects_current_release_around_abandoned_versions(
+    tmp_path, draft, tag_target, latest, expected
+):
+    old = "b" * 40
+    write_json(tmp_path / "pypi.json", {"info": {"version": latest}})
+    write_json(tmp_path / "associated-pulls.json", [])
+    write_json(
+        tmp_path / "releases.json",
+        [
+            {
+                "tag_name": "v1.3.3",
+                "target_commitish": old,
+                "draft": True,
+                "body": f"Release-Source-SHA: {old}\nPackage-Version: 1.3.3",
+            }
+        ]
+        if draft
+        else [],
+    )
+    tags = ""
+    if tag_target:
+        target = SOURCE_SHA if tag_target.endswith("current") else old
+        if tag_target.startswith("annotated"):
+            tags = f"{'d' * 40}\trefs/tags/v1.3.3\n{target}\trefs/tags/v1.3.3^{{}}\n"
+        else:
+            tags = f"{target}\trefs/tags/v1.3.3\n"
+    (tmp_path / "tag-refs.txt").write_text(tags)
+    (tmp_path / "commit-message.txt").write_text("ordinary change")
+    (tmp_path / "gh-output").touch()
+    choose = workflow_step(
+        "prepare", "Select release version from exact PR association"
+    )
+    result, _ = run_workflow_step(f"export DEFAULT_BRANCH=main\n{choose}", tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "gh-output").read_text().splitlines() == [
+        f"version={expected}",
+        "part=patch",
+        "skip=false",
+    ]
 
 
 def test_pypi_artifact_cli_simulates_publish_retry_failure_and_conflict(tmp_path):
@@ -353,7 +416,7 @@ def test_draft_release_creation_and_duplicate_retry_are_idempotent(tmp_path):
     assert created.returncode == 0, created.stderr
     assert state["create_count"] == 1
     assert state["release"]["draft"] is True
-    assert len(state["assets"]) == 3
+    assert not state["assets"]
     assert (
         "repos/Skulldorom/flask-session.manager.sk/git/ref/tags/v1.3.3"
         in state["api_endpoints"]
@@ -363,28 +426,75 @@ def test_draft_release_creation_and_duplicate_retry_are_idempotent(tmp_path):
     duplicate, retried_state = run_workflow_step(script, tmp_path)
     assert duplicate.returncode == 0, duplicate.stderr
     assert retried_state["create_count"] == 1
-    assert retried_state["upload_count"] == 3
-    assert len(retried_state["assets"]) == 3
+    assert retried_state["upload_count"] == 0
 
 
-def test_partial_draft_creation_is_repaired_without_clobber_on_retry(tmp_path):
+def test_created_draft_is_verified_by_id_when_missing_from_collection(tmp_path):
     release_fixture(tmp_path)
-    script = workflow_step(
+    reserve = workflow_step(
         "reserve-release", "Create or verify the draft release reservation"
     )
+    result, state = run_workflow_step(reserve, tmp_path, hide_created_draft=True)
+    assert result.returncode == 0, result.stderr
+    assert state["tag_sha"] == SOURCE_SHA
+    assert state["create_count"] == 1
+    assert state["release"]["draft"] is True
+    assert not state["assets"]
+    assert state["hide_release_from_list"]
+    assert (
+        sum("/releases?per_page=" in endpoint for endpoint in state["api_endpoints"])
+        == 1
+    )
 
-    interrupted, partial_state = run_workflow_step(
-        script, tmp_path, partial_create=True
+    key, release_id = (tmp_path / "gh-output").read_text().strip().split("=")
+    assert key == "release_id" and release_id == str(state["release"]["id"])
+    upload = workflow_step(
+        "upload-release-assets", "Upload missing assets by reservation ID"
+    )
+    interrupted, partial = run_workflow_step(
+        upload, tmp_path, release_id=release_id, partial_create=True
     )
     assert interrupted.returncode != 0
-    assert partial_state["create_count"] == 1
-    assert len(partial_state["assets"]) == 1
+    assert len(partial["assets"]) == 1
 
-    resumed, complete_state = run_workflow_step(script, tmp_path)
-    assert resumed.returncode == 0, resumed.stderr
-    assert complete_state["create_count"] == 1
-    assert complete_state["upload_count"] == 3
-    assert len(complete_state["assets"]) == 3
+    # A failed-job retry receives the successful reservation job's ID.
+    result, complete = run_workflow_step(upload, tmp_path, release_id=release_id)
+    assert result.returncode == 0, result.stderr
+    assert complete["create_count"] == 1
+    assert complete["upload_count"] == 3
+    assert len(complete["assets"]) == 3
+
+    finalize = workflow_step(
+        "finalize-release", "Verify draft assets and publish the release"
+    )
+    result, published = run_workflow_step(finalize, tmp_path, release_id=release_id)
+    assert result.returncode == 0, result.stderr
+    assert published["release"]["draft"] is False
+    assert (
+        sum(
+            "/releases?per_page=" in endpoint for endpoint in published["api_endpoints"]
+        )
+        == 1
+    )
+
+
+def test_retry_with_hidden_draft_and_no_id_never_attempts_second_creation(tmp_path):
+    release_fixture(tmp_path)
+    reserve = workflow_step(
+        "reserve-release", "Create or verify the draft release reservation"
+    )
+    created, state = run_workflow_step(reserve, tmp_path, hide_created_draft=True)
+    assert created.returncode == 0, created.stderr
+    original_requests = len(state["api_endpoints"])
+
+    retry, state = run_workflow_step(reserve, tmp_path)
+    assert retry.returncode != 0
+    assert "refusing another draft creation" in retry.stderr
+    retry_requests = state["api_endpoints"][original_requests:]
+    assert f"repos/{REPOSITORY}/releases" not in retry_requests
+    assert state["create_count"] == 1
+    assert not state["assets"]
+    assert state["release"]["draft"]
 
 
 def test_conflicting_draft_asset_is_never_overwritten(tmp_path):
@@ -470,6 +580,17 @@ def test_github_release_finalization_failure_leaves_draft_unpublished(tmp_path):
         "finalize-release", "Verify draft assets and publish the release"
     )
 
-    failed, final_state = run_workflow_step(script, tmp_path, state=state)
+    failed, final_state = run_workflow_step(
+        script, tmp_path, state=state, release_id="17"
+    )
     assert failed.returncode != 0
+    assert "HTTP 500" in failed.stderr
     assert final_state["release"]["draft"] is True
+
+    final_state["patch_fails"] = False
+    resumed, published = run_workflow_step(
+        script, tmp_path, state=final_state, release_id="17"
+    )
+    assert resumed.returncode == 0, resumed.stderr
+    assert published["release"]["draft"] is False
+    assert published["upload_count"] == 0

@@ -28,9 +28,7 @@ state = (
     }
 )
 args = sys.argv[1:]
-endpoint = next(
-    arg for arg in args if arg.startswith(("repos/", "https://")) or arg == "user"
-)
+endpoint = next(arg for arg in args if arg.startswith(("repos/", "https://")))
 method = args[args.index("--method") + 1] if "--method" in args else "GET"
 included = "--include" in args
 url = urlsplit(endpoint)
@@ -57,42 +55,6 @@ def respond(status, value):
 
 
 save()
-if path == "user":
-    respond(200, {"login": "maintainer", "type": "User"})
-if "/collaborators/" in path:
-    login = path.split("/collaborators/")[1].split("/")[0]
-    respond(
-        200,
-        {
-            "permission": "admin",
-            "role_name": state.get("role_name", "admin"),
-            "user": {"login": login},
-        },
-    )
-if "/actions/workflows/" in path:
-    if path.endswith("/runs"):
-        respond(200, {"workflow_runs": [{"id": 100}]})
-    respond(200, {"id": 327914495, "name": "CI", "path": ".github/workflows/ci.yml"})
-if "/actions/runs/" in path:
-    source = (
-        os.environ["SOURCE_SHA"] if path.endswith("/44095831330") else state["main_sha"]
-    )
-    respond(
-        200,
-        {
-            "id": int(path.rsplit("/", 1)[1]),
-            "head_sha": source,
-            "head_branch": "main",
-            "repository": {"full_name": os.environ["GITHUB_REPOSITORY"]},
-            "head_repository": {"full_name": os.environ["GITHUB_REPOSITORY"]},
-            "workflow_id": 327914495,
-            "name": "CI",
-            "path": ".github/workflows/ci.yml",
-            "event": "push",
-            "status": "completed",
-            "conclusion": state.get("ci_conclusion", "success"),
-        },
-    )
 if "/git/ref/heads/" in path:
     respond(
         200,
@@ -140,11 +102,14 @@ if path.endswith("/releases/generate-notes"):
     respond(200, {"body": "Generated notes"})
 if path.endswith("/releases"):
     if method == "GET":
-        respond(200, [state["release"]] if state.get("release") else [])
+        visible = state.get("release") and not state.get("hide_release_from_list")
+        respond(200, [state["release"]] if visible else [])
     if state.get("release"):
         respond(422, {"message": "already_exists"})
     state["release"] = {**payload, "id": 17}
     state["create_count"] += 1
+    if os.environ.get("MOCK_GH_HIDE_CREATED_DRAFT") == "1":
+        state["hide_release_from_list"] = True
     # Deliberately do not create a tag here.
     respond(201, state["release"])
 if "/releases/assets/" in path:
@@ -181,6 +146,10 @@ if path.endswith("/assets"):
         sys.exit(1)  # Upload succeeded, client interrupted before response.
     respond(201, {"id": len(state["assets"]), "name": name})
 if "/releases/" in path and path.rsplit("/", 1)[1].isdigit():
+    if not state.get("release") or path.rsplit("/", 1)[1] != str(
+        state["release"]["id"]
+    ):
+        respond(404, {"message": "Not Found"})
     if method == "PATCH":
         if state.get("patch_fails"):
             respond(500, {"message": "simulated update failure"})
