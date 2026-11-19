@@ -416,7 +416,7 @@ def test_draft_release_creation_and_duplicate_retry_are_idempotent(tmp_path):
     assert created.returncode == 0, created.stderr
     assert state["create_count"] == 1
     assert state["release"]["draft"] is True
-    assert len(state["assets"]) == 3
+    assert not state["assets"]
     assert (
         "repos/Skulldorom/flask-session.manager.sk/git/ref/tags/v1.3.3"
         in state["api_endpoints"]
@@ -426,8 +426,7 @@ def test_draft_release_creation_and_duplicate_retry_are_idempotent(tmp_path):
     duplicate, retried_state = run_workflow_step(script, tmp_path)
     assert duplicate.returncode == 0, duplicate.stderr
     assert retried_state["create_count"] == 1
-    assert retried_state["upload_count"] == 3
-    assert len(retried_state["assets"]) == 3
+    assert retried_state["upload_count"] == 0
 
 
 def test_created_draft_is_verified_by_id_when_missing_from_collection(tmp_path):
@@ -440,7 +439,7 @@ def test_created_draft_is_verified_by_id_when_missing_from_collection(tmp_path):
     assert state["tag_sha"] == SOURCE_SHA
     assert state["create_count"] == 1
     assert state["release"]["draft"] is True
-    assert len(state["assets"]) == 3
+    assert not state["assets"]
     assert state["hide_release_from_list"]
     assert (
         sum("/releases?per_page=" in endpoint for endpoint in state["api_endpoints"])
@@ -449,6 +448,22 @@ def test_created_draft_is_verified_by_id_when_missing_from_collection(tmp_path):
 
     key, release_id = (tmp_path / "gh-output").read_text().strip().split("=")
     assert key == "release_id" and release_id == str(state["release"]["id"])
+    upload = workflow_step(
+        "upload-release-assets", "Upload missing assets by reservation ID"
+    )
+    interrupted, partial = run_workflow_step(
+        upload, tmp_path, release_id=release_id, partial_create=True
+    )
+    assert interrupted.returncode != 0
+    assert len(partial["assets"]) == 1
+
+    # A failed-job retry receives the successful reservation job's ID.
+    result, complete = run_workflow_step(upload, tmp_path, release_id=release_id)
+    assert result.returncode == 0, result.stderr
+    assert complete["create_count"] == 1
+    assert complete["upload_count"] == 3
+    assert len(complete["assets"]) == 3
+
     finalize = workflow_step(
         "finalize-release", "Verify draft assets and publish the release"
     )
@@ -463,24 +478,23 @@ def test_created_draft_is_verified_by_id_when_missing_from_collection(tmp_path):
     )
 
 
-def test_partial_draft_creation_is_repaired_without_clobber_on_retry(tmp_path):
+def test_retry_with_hidden_draft_and_no_id_never_attempts_second_creation(tmp_path):
     release_fixture(tmp_path)
-    script = workflow_step(
+    reserve = workflow_step(
         "reserve-release", "Create or verify the draft release reservation"
     )
+    created, state = run_workflow_step(reserve, tmp_path, hide_created_draft=True)
+    assert created.returncode == 0, created.stderr
+    original_requests = len(state["api_endpoints"])
 
-    interrupted, partial_state = run_workflow_step(
-        script, tmp_path, partial_create=True
-    )
-    assert interrupted.returncode != 0
-    assert partial_state["create_count"] == 1
-    assert len(partial_state["assets"]) == 1
-
-    resumed, complete_state = run_workflow_step(script, tmp_path)
-    assert resumed.returncode == 0, resumed.stderr
-    assert complete_state["create_count"] == 1
-    assert complete_state["upload_count"] == 3
-    assert len(complete_state["assets"]) == 3
+    retry, state = run_workflow_step(reserve, tmp_path)
+    assert retry.returncode != 0
+    assert "refusing another draft creation" in retry.stderr
+    retry_requests = state["api_endpoints"][original_requests:]
+    assert f"repos/{REPOSITORY}/releases" not in retry_requests
+    assert state["create_count"] == 1
+    assert not state["assets"]
+    assert state["release"]["draft"]
 
 
 def test_conflicting_draft_asset_is_never_overwritten(tmp_path):

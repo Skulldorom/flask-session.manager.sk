@@ -212,16 +212,28 @@ class Release:
             present.add(name)
         return sorted(self.expected.keys() - present)
 
-    def run(self, *, finalize=False, release_id=None):
+    def run(self, *, finalize=False, release_id=None, reserve_only=False):
         self.guard()
         tag = self.tag_commit()
         release = self.discover() if release_id is None else self.by_id(release_id)
+        if tag is not None and release is None:
+            raise ValueError(
+                "tag exists but no draft is visible; refusing another draft creation"
+            )
+        if release_id is not None and tag is None:
+            raise ValueError("verified reservation tag is missing")
         # Validate every existing byte BEFORE reconciling a missing tag.
         missing = self.assets(release) if release else sorted(self.expected)
         if finalize and (release is None or tag is None or missing):
             raise ValueError("finalization requires a complete verified reservation")
         if release and not release["draft"] and (missing or tag is None):
             raise ValueError("published release has incomplete reservation")
+        if release is None:
+            notes = self.api.request(
+                f"{self.base}/releases/generate-notes",
+                method="POST",
+                payload={"tag_name": self.tag, "target_commitish": self.source},
+            )
         if tag is None:
             self.guard()
             try:
@@ -243,11 +255,6 @@ class Release:
                 raise ValueError("tag creation did not reserve authorized commit")
         if release is None:
             self.guard()
-            notes = self.api.request(
-                f"{self.base}/releases/generate-notes",
-                method="POST",
-                payload={"tag_name": self.tag, "target_commitish": self.source},
-            )
             created = self.api.request(
                 f"{self.base}/releases",
                 method="POST",
@@ -272,6 +279,9 @@ class Release:
             if self.tag_commit() != self.source:
                 raise ValueError("release tag disappeared after draft creation")
             missing = self.assets(release)
+        if reserve_only:
+            self.guard()
+            return release["id"]
         for name in missing:
             self.guard()
             # Re-read before each upload: never clobber another invocation's asset.
@@ -315,7 +325,7 @@ class Release:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=["reserve", "finalize", "list"])
+    parser.add_argument("action", choices=["reserve", "upload", "finalize", "list"])
     args = parser.parse_args()
     api = GitHub()
     repository = os.environ["GITHUB_REPOSITORY"]
@@ -324,10 +334,10 @@ def main():
         return
     finalize = args.action == "finalize"
     release_id = None
-    if finalize:
+    if args.action in {"upload", "finalize"}:
         value = os.environ.get("RELEASE_ID", "")
         if not re.fullmatch(r"[1-9][0-9]*", value):
-            raise ValueError("finalization requires a verified numeric reservation ID")
+            raise ValueError("a verified numeric reservation ID is required")
         release_id = int(value)
     verified_id = Release(
         api,
@@ -335,8 +345,10 @@ def main():
         os.environ["SOURCE_SHA"],
         os.environ["VERSION"],
         Path("dist"),
-    ).run(finalize=finalize, release_id=release_id)
-    if not finalize and (output := os.environ.get("GITHUB_OUTPUT")):
+    ).run(
+        finalize=finalize, release_id=release_id, reserve_only=args.action == "reserve"
+    )
+    if args.action == "reserve" and (output := os.environ.get("GITHUB_OUTPUT")):
         with Path(output).open("a") as stream:
             stream.write(f"release_id={verified_id}\n")
 

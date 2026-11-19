@@ -126,6 +126,11 @@ def test_every_reservation_state_recovers_and_finalizes(
 ):
     release, api = machine
     api.tag = tag
+    if tag and not draft:
+        with pytest.raises(ValueError, match="refusing another draft creation"):
+            release.run()
+        assert not api.releases
+        return
     if draft:
         api.draft()
         api.uploaded = {
@@ -160,6 +165,7 @@ def test_uncertain_success_is_reconciled_by_next_invocation(machine, point):
 def test_annotated_tag(machine):
     release, api = machine
     api.tag, api.annotated = SOURCE_SHA, True
+    api.draft()
     release.run()
 
 
@@ -195,6 +201,7 @@ def test_concurrent_tag_creation_is_verified_not_overwritten(machine, winner):
     if winner == SOURCE_SHA:
         with pytest.raises(ValueError, match="concurrent"):
             release.run()
+        api.draft()
         release.run()
     else:
         with pytest.raises(ValueError, match="conflicts"):
@@ -204,7 +211,6 @@ def test_concurrent_tag_creation_is_verified_not_overwritten(machine, winner):
 
 def test_concurrent_draft_creation_does_not_retry_the_post(machine):
     release, api = machine
-    api.tag = SOURCE_SHA
     api.draft_race = True
     with pytest.raises(APIError, match="422"):
         release.run()

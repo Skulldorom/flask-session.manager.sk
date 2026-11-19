@@ -111,21 +111,31 @@ def test_release_jobs_have_explicit_permissions_and_correct_dag():
     }
     assert jobs["publish-pypi"]["permissions"]["contents"] == "read"
     assert jobs["reserve-release"]["permissions"] == {"contents": "write"}
+    assert jobs["upload-release-assets"]["permissions"] == {"contents": "write"}
     assert jobs["finalize-release"]["permissions"] == {"contents": "write"}
     assert jobs["reserve-release"]["needs"] == ["authorize", "prepare"]
-    assert jobs["publish-pypi"]["needs"] == [
+    assert jobs["upload-release-assets"]["needs"] == [
         "authorize",
         "prepare",
         "reserve-release",
+    ]
+    assert jobs["publish-pypi"]["needs"] == [
+        "authorize",
+        "prepare",
+        "upload-release-assets",
     ]
     assert jobs["finalize-release"]["needs"] == [
         "authorize",
         "prepare",
         "reserve-release",
+        "upload-release-assets",
         "publish-pypi",
     ]
     assert "needs.prepare.outputs.skip != 'true'" in jobs["publish-pypi"]["if"]
-    assert "needs.reserve-release.result == 'success'" in jobs["finalize-release"]["if"]
+    assert (
+        "needs.upload-release-assets.result == 'success'"
+        in jobs["finalize-release"]["if"]
+    )
 
 
 def test_actions_are_pinned_to_full_commit_shas():
