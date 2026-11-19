@@ -149,6 +149,9 @@ def test_expanded_ci_gates_run_on_pull_requests_without_path_filters():
     assert "paths" not in str(workflow["on"])
     for job_id in ("release-policy", "dependency-audit", "companion-compatibility"):
         assert job_id in workflow["jobs"]
+    # The executable historical handoff verifies the real source ancestry.
+    for job_id in ("test", "release-policy"):
+        assert workflow["jobs"][job_id]["steps"][0]["with"]["fetch-depth"] == "0"
 
 
 def test_recovery_has_no_elevated_credentials_or_generic_publication_bypass():
