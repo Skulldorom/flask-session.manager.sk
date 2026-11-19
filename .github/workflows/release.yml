@@ -186,6 +186,8 @@ jobs:
     if: needs.prepare.outputs.skip != 'true'
     permissions:
       contents: write
+    outputs:
+      release_id: ${{ steps.reservation.outputs.release_id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -195,6 +197,7 @@ jobs:
           name: release-${{ needs.prepare.outputs.version }}
           path: dist
       - name: Create or verify the draft release reservation
+        id: reservation
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
@@ -281,6 +284,7 @@ jobs:
             --reservation-verified
       - name: Verify draft assets and publish the release
         env:
+          RELEASE_ID: ${{ needs.reserve-release.outputs.release_id }}
           GH_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
           MAIN_SHA: ${{ needs.authorize.outputs.main_sha }}

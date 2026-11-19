@@ -83,6 +83,8 @@ def run_workflow_step(
     tmp_path: Path,
     *,
     partial_create: bool = False,
+    hide_created_draft: bool = False,
+    release_id: str = "",
     state: dict | None = None,
 ) -> tuple[subprocess.CompletedProcess, dict]:
     state_path = tmp_path / "gh-state.json"
@@ -96,6 +98,9 @@ def run_workflow_step(
             "PYTHONPATH": str(ROOT),
             "GITHUB_REPOSITORY": REPOSITORY,
             "GH_TOKEN": "test-only-read-write-token",
+            "GITHUB_OUTPUT": str(tmp_path / "gh-output"),
+            "RELEASE_ID": release_id,
+            "MOCK_GH_HIDE_CREATED_DRAFT": str(int(hide_created_draft)),
             "SOURCE_SHA": SOURCE_SHA,
             "VERSION": VERSION,
             "MOCK_GH_STATE": str(state_path),
@@ -367,6 +372,39 @@ def test_draft_release_creation_and_duplicate_retry_are_idempotent(tmp_path):
     assert len(retried_state["assets"]) == 3
 
 
+def test_created_draft_is_verified_by_id_when_missing_from_collection(tmp_path):
+    release_fixture(tmp_path)
+    reserve = workflow_step(
+        "reserve-release", "Create or verify the draft release reservation"
+    )
+    result, state = run_workflow_step(reserve, tmp_path, hide_created_draft=True)
+    assert result.returncode == 0, result.stderr
+    assert state["tag_sha"] == SOURCE_SHA
+    assert state["create_count"] == 1
+    assert state["release"]["draft"] is True
+    assert len(state["assets"]) == 3
+    assert state["hide_release_from_list"]
+    assert (
+        sum("/releases?per_page=" in endpoint for endpoint in state["api_endpoints"])
+        == 1
+    )
+
+    key, release_id = (tmp_path / "gh-output").read_text().strip().split("=")
+    assert key == "release_id" and release_id == str(state["release"]["id"])
+    finalize = workflow_step(
+        "finalize-release", "Verify draft assets and publish the release"
+    )
+    result, published = run_workflow_step(finalize, tmp_path, release_id=release_id)
+    assert result.returncode == 0, result.stderr
+    assert published["release"]["draft"] is False
+    assert (
+        sum(
+            "/releases?per_page=" in endpoint for endpoint in published["api_endpoints"]
+        )
+        == 1
+    )
+
+
 def test_partial_draft_creation_is_repaired_without_clobber_on_retry(tmp_path):
     release_fixture(tmp_path)
     script = workflow_step(
@@ -470,6 +508,17 @@ def test_github_release_finalization_failure_leaves_draft_unpublished(tmp_path):
         "finalize-release", "Verify draft assets and publish the release"
     )
 
-    failed, final_state = run_workflow_step(script, tmp_path, state=state)
+    failed, final_state = run_workflow_step(
+        script, tmp_path, state=state, release_id="17"
+    )
     assert failed.returncode != 0
+    assert "HTTP 500" in failed.stderr
     assert final_state["release"]["draft"] is True
+
+    final_state["patch_fails"] = False
+    resumed, published = run_workflow_step(
+        script, tmp_path, state=final_state, release_id="17"
+    )
+    assert resumed.returncode == 0, resumed.stderr
+    assert published["release"]["draft"] is False
+    assert published["upload_count"] == 0

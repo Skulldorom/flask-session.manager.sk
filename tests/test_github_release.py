@@ -27,10 +27,11 @@ class ContractAPI:
         self.calls = []
         self.interrupt = None
         self.tag_race = None
+        self.draft_race = False
 
     def draft(self):
         r = {
-            "id": 448693106,
+            "id": 17,
             "tag_name": f"v{VERSION}",
             "target_commitish": SOURCE_SHA,
             "draft": True,
@@ -84,6 +85,9 @@ class ContractAPI:
         if endpoint.endswith("/releases/generate-notes"):
             return {"body": "Notes"}
         if method == "POST" and endpoint.endswith("/releases"):
+            if self.draft_race:
+                self.draft()
+                raise APIError(422)
             self.releases.append({**payload, "id": 17})
             # Crucial contract: draft create never assigns self.tag.
             if self.interrupt == "draft":
@@ -198,13 +202,62 @@ def test_concurrent_tag_creation_is_verified_not_overwritten(machine, winner):
         assert not api.releases
 
 
-def test_recovery_can_guard_current_tested_main_without_relabeling_source(machine):
+def test_concurrent_draft_creation_does_not_retry_the_post(machine):
     release, api = machine
-    release.main_sha = api.source = "b" * 40
-    api.draft()
+    api.tag = SOURCE_SHA
+    api.draft_race = True
+    with pytest.raises(APIError, match="422"):
+        release.run()
+    assert len(api.releases) == 1 and not api.uploaded
     release.run()
-    assert api.tag == SOURCE_SHA
-    assert api.releases[0]["target_commitish"] == SOURCE_SHA
+    assert set(api.uploaded) == set(release.expected)
+    assert api.calls.count(("POST", f"repos/{REPOSITORY}/releases")) == 1
+
+
+@pytest.mark.parametrize(
+    "change", [{"id": 18}, {"target_commitish": "b" * 40}, {"draft": False}]
+)
+def test_direct_read_must_confirm_the_created_draft(machine, monkeypatch, change):
+    release, api = machine
+    request = api.request
+
+    def conflicting_read(endpoint, **kwargs):
+        result = request(endpoint, **kwargs)
+        if endpoint.endswith("/releases/17"):
+            return {**result, **change}
+        return result
+
+    monkeypatch.setattr(api, "request", conflicting_read)
+    with pytest.raises(ValueError):
+        release.run()
+    assert not api.uploaded
+
+
+@pytest.mark.parametrize("value", [None, {}, {"id": True}, {"id": "17"}, {"id": 0}])
+def test_invalid_create_identity_never_reaches_upload(machine, monkeypatch, value):
+    release, api = machine
+    request = api.request
+
+    def malformed_create(endpoint, **kwargs):
+        result = request(endpoint, **kwargs)
+        if endpoint.endswith("/releases") and kwargs.get("method") == "POST":
+            return value
+        return result
+
+    monkeypatch.setattr(api, "request", malformed_create)
+    with pytest.raises(ValueError, match="response|ID"):
+        release.run()
+    assert not api.uploaded
+
+
+def test_main_advances_after_reservation_blocks_finalize(machine):
+    release, api = machine
+    release_id = release.run()
+    api.source = "b" * 40
+    with pytest.raises(ValueError, match="main moved"):
+        release.run(finalize=True, release_id=release_id)
+    assert api.releases[0]["draft"]
+    assert not any(method == "PATCH" for method, _ in api.calls)
 
 
 @pytest.mark.parametrize("status", [401, 403, 404, 422, 429, 500, 502, 503])

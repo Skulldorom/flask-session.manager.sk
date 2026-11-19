@@ -77,7 +77,7 @@ class GitHub:
 
 
 class Release:
-    def __init__(self, api, repository, source, version, dist, *, main_sha=None):
+    def __init__(self, api, repository, source, version, dist):
         if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
             raise ValueError("invalid repository")
         if not SHA.fullmatch(source) or not re.fullmatch(r"\d+\.\d+\.\d+", version):
@@ -85,9 +85,6 @@ class Release:
         self.api, self.repository = api, repository
         self.base = f"repos/{repository}"
         self.source, self.version, self.dist = source, version, dist
-        self.main_sha = main_sha or source
-        if not SHA.fullmatch(self.main_sha):
-            raise ValueError("invalid authorized main SHA")
         self.tag = f"v{version}"
         self.manifest = json.loads((dist / "release-manifest.json").read_text())
         if (
@@ -119,7 +116,7 @@ class Release:
         ref = self.api.request(f"{self.base}/git/ref/heads/main")
         if ref.get("ref") != "refs/heads/main" or _object(ref.get("object")) != (
             "commit",
-            self.main_sha,
+            self.source,
         ):
             raise ValueError("main moved; release source is stale")
 
@@ -150,9 +147,7 @@ class Release:
 
     def validate(self, release):
         if (
-            type(release.get("id")) is not int
-            or release["id"] <= 0
-            or release.get("tag_name") != self.tag
+            release.get("tag_name") != self.tag
             or release.get("target_commitish") != self.source
             or type(release.get("draft")) is not bool
             or release.get("prerelease") is not False
@@ -169,6 +164,16 @@ class Release:
                 raise ValueError("release source metadata conflicts")
         return release
 
+    def by_id(self, release_id):
+        if type(release_id) is not int or release_id <= 0:
+            raise ValueError("invalid GitHub release ID")
+        release = self.api.request(f"{self.base}/releases/{release_id}")
+        if not isinstance(release, dict) or type(release.get("id")) is not int:
+            raise ValueError("GitHub returned a malformed release")
+        if release["id"] != release_id:
+            raise ValueError("GitHub returned a different release ID")
+        return self.validate(release)
+
     def discover(self):
         matches = [
             r
@@ -179,10 +184,7 @@ class Release:
             raise ValueError("multiple releases reserve this version")
         if not matches:
             return None
-        release = self.api.request(f"{self.base}/releases/{matches[0]['id']}")
-        if release.get("id") != matches[0]["id"]:
-            raise ValueError("release ID conflicts with discovery")
-        return self.validate(release)
+        return self.by_id(matches[0]["id"])
 
     def assets(self, release):
         assets = self.api.collection(f"{self.base}/releases/{release['id']}/assets")
@@ -210,34 +212,12 @@ class Release:
             present.add(name)
         return sorted(self.expected.keys() - present)
 
-    def verify(self, *, release_id=None, require_tag=True):
-        """Read-only reservation verification, also used by one-time recovery."""
+    def run(self, *, finalize=False, release_id=None):
         self.guard()
         tag = self.tag_commit()
-        release = self.discover()
-        if release is None or (release_id is not None and release["id"] != release_id):
-            raise ValueError("expected existing release ID not found")
-        if self.assets(release):
-            raise ValueError("existing reservation has missing assets")
-        if require_tag and tag is None:
-            raise ValueError(
-                "reservation tag is missing; maintainer reconciliation required"
-            )
-        self.guard()
-        return release, tag
-
-    def run(self, *, finalize=False, existing_id=None):
-        self.guard()
-        tag = self.tag_commit()
-        release = self.discover()
+        release = self.discover() if release_id is None else self.by_id(release_id)
         # Validate every existing byte BEFORE reconciling a missing tag.
         missing = self.assets(release) if release else sorted(self.expected)
-        if existing_id is not None and (
-            release is None or release["id"] != existing_id or missing
-        ):
-            raise ValueError(
-                "one-time recovery requires the complete existing draft ID"
-            )
         if finalize and (release is None or tag is None or missing):
             raise ValueError("finalization requires a complete verified reservation")
         if release and not release["draft"] and (missing or tag is None):
@@ -268,7 +248,7 @@ class Release:
                 method="POST",
                 payload={"tag_name": self.tag, "target_commitish": self.source},
             )
-            self.api.request(
+            created = self.api.request(
                 f"{self.base}/releases",
                 method="POST",
                 payload={
@@ -283,19 +263,23 @@ class Release:
                     ),
                 },
             )
-            release = self.discover()
-            if release is None or not release["draft"]:
-                raise ValueError("new draft reservation not found")
+            # POST returned the identity. The collection may omit this draft.
+            if not isinstance(created, dict):
+                raise ValueError("GitHub returned a malformed create response")
+            release = self.by_id(created.get("id"))
+            if not release["draft"]:
+                raise ValueError("new reservation is not a draft")
+            if self.tag_commit() != self.source:
+                raise ValueError("release tag disappeared after draft creation")
+            missing = self.assets(release)
         for name in missing:
             self.guard()
             # Re-read before each upload: never clobber another invocation's asset.
-            current = self.discover()
-            if (
-                current is None
-                or current["id"] != release["id"]
-                or not current["draft"]
-            ):
+            current = self.by_id(release["id"])
+            if not current["draft"]:
                 raise ValueError("draft changed during asset upload")
+            if self.tag_commit() != self.source:
+                raise ValueError("release tag disappeared before asset upload")
             if name not in self.assets(current):
                 continue
             self.api.request(
@@ -306,8 +290,8 @@ class Release:
                 method="POST",
                 file=self.dist / name,
             )
-        current = self.discover()
-        if current is None or current["id"] != release["id"] or self.assets(current):
+        current = self.by_id(release["id"])
+        if current["draft"] != release["draft"] or self.assets(current):
             raise ValueError("release reservation is incomplete or changed")
         self.guard()
         if self.tag_commit() != self.source:
@@ -319,12 +303,8 @@ class Release:
                 method="PATCH",
                 payload={"draft": False},
             )
-            published = self.discover()
-            if (
-                published is None
-                or published["id"] != current["id"]
-                or published["draft"]
-            ):
+            published = self.by_id(current["id"])
+            if published["draft"]:
                 raise ValueError("release publication not confirmed")
         print(
             f"Verified {'published release' if finalize else 'reservation'} "
@@ -342,13 +322,23 @@ def main():
     if args.action == "list":
         print(json.dumps(api.collection(f"repos/{repository}/releases")))
         return
-    Release(
+    finalize = args.action == "finalize"
+    release_id = None
+    if finalize:
+        value = os.environ.get("RELEASE_ID", "")
+        if not re.fullmatch(r"[1-9][0-9]*", value):
+            raise ValueError("finalization requires a verified numeric reservation ID")
+        release_id = int(value)
+    verified_id = Release(
         api,
         repository,
         os.environ["SOURCE_SHA"],
         os.environ["VERSION"],
         Path("dist"),
-    ).run(finalize=args.action == "finalize")
+    ).run(finalize=finalize, release_id=release_id)
+    if not finalize and (output := os.environ.get("GITHUB_OUTPUT")):
+        with Path(output).open("a") as stream:
+            stream.write(f"release_id={verified_id}\n")
 
 
 if __name__ == "__main__":
