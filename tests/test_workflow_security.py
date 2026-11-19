@@ -21,12 +21,7 @@ def assert_authenticated_github_steps(workflow: dict) -> None:
         job_env = job.get("env", {})
         for index, step in enumerate(job.get("steps", [])):
             run = step.get("run", "")
-            if not (
-                AUTHENTICATED_GH.search(run)
-                or "scripts.github_release" in run
-                or "scripts.select_recovery_source" in run
-                or "scripts.release_recovery" in run
-            ):
+            if not (AUTHENTICATED_GH.search(run) or "scripts.github_release" in run):
                 continue
             step_env = {**job_env, **step.get("env", {})}
             expected = TOKEN
@@ -149,7 +144,7 @@ def test_expanded_ci_gates_run_on_pull_requests_without_path_filters():
     assert "paths" not in str(workflow["on"])
     for job_id in ("release-policy", "dependency-audit", "companion-compatibility"):
         assert job_id in workflow["jobs"]
-    # The executable historical handoff verifies the real source ancestry.
+    # VCS version inference and builds use the full tag history.
     for job_id in ("test", "release-policy"):
         assert workflow["jobs"][job_id]["steps"][0]["with"]["fetch-depth"] == "0"
 

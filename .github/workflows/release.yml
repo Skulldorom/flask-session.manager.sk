@@ -23,8 +23,7 @@ jobs:
       actions: read
       contents: read
     outputs:
-      source_sha: ${{ steps.recovery.outputs.source_sha }}
-      main_sha: ${{ steps.recovery.outputs.main_sha }}
+      source_sha: ${{ steps.authorize.outputs.source_sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -49,11 +48,6 @@ jobs:
             --workflow workflow.json \
             --default-ref default-ref.json \
             --repository repository.json
-      - name: Select an authorized interrupted release source
-        id: recovery
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: python -m scripts.select_recovery_source
 
   prepare:
     name: Select and build immutable artifacts
@@ -94,6 +88,7 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/commits/$SOURCE_SHA/pulls" > associated-pulls.json
           gh api "repos/$GITHUB_REPOSITORY/commits/$SOURCE_SHA" > source-commit.json
           python -m scripts.github_release list > releases.json
+          git ls-remote --tags origin > tag-refs.txt
           python - <<'PY' > pypi.json
           import json
           from urllib.request import urlopen
@@ -122,6 +117,7 @@ jobs:
             --branch "$DEFAULT_BRANCH" \
             --pull-requests associated-pulls.json \
             --releases releases.json \
+            --tag-refs tag-refs.txt \
             --commit-message-file commit-message.txt
           cat "$GITHUB_OUTPUT"
       - name: Publish selected version as job output
@@ -148,7 +144,6 @@ jobs:
         if: steps.selected.outputs.skip != 'true'
         env:
           SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
-          MAIN_SHA: ${{ needs.authorize.outputs.main_sha }}
           VERSION: ${{ steps.selected.outputs.version }}
         working-directory: source
         run: |
@@ -161,7 +156,6 @@ jobs:
         if: steps.selected.outputs.skip != 'true'
         env:
           SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
-          MAIN_SHA: ${{ needs.authorize.outputs.main_sha }}
           VERSION: ${{ steps.selected.outputs.version }}
         run: |
           python -m scripts.validate_release_artifacts \
@@ -201,7 +195,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
-          MAIN_SHA: ${{ needs.authorize.outputs.main_sha }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           python -m scripts.github_release reserve
@@ -227,12 +220,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
-          MAIN_SHA: ${{ needs.authorize.outputs.main_sha }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
           CURRENT_SHA="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
-          test "$CURRENT_SHA" = "$MAIN_SHA"
+          test "$CURRENT_SHA" = "$SOURCE_SHA"
           python - <<'PY'
           import hashlib, json, os
           from pathlib import Path
@@ -287,7 +279,6 @@ jobs:
           RELEASE_ID: ${{ needs.reserve-release.outputs.release_id }}
           GH_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
-          MAIN_SHA: ${{ needs.authorize.outputs.main_sha }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           python -m scripts.github_release finalize

@@ -185,6 +185,8 @@ def test_release_selection_cli_covers_labels_conflicts_ambiguity_and_retry(tmp_p
     pypi = write_json(tmp_path / "pypi.json", {"info": {"version": "1.3.2"}})
     prs = write_json(tmp_path / "prs.json", [merged_pr])
     releases = write_json(tmp_path / "releases.json", [])
+    tags = tmp_path / "tag-refs.txt"
+    tags.touch()
     commit = tmp_path / "message.txt"
     commit.write_text("feat: release capability\n")
     output = tmp_path / "selection.txt"
@@ -199,6 +201,8 @@ def test_release_selection_cli_covers_labels_conflicts_ambiguity_and_retry(tmp_p
         prs,
         "--releases",
         releases,
+        "--tag-refs",
+        tags,
         "--commit-message-file",
         commit,
         "--output",
@@ -232,6 +236,60 @@ def test_release_selection_cli_covers_labels_conflicts_ambiguity_and_retry(tmp_p
     assert retry.returncode == 0, retry.stderr
     assert "version=1.3.3" in output.read_text()
     assert "part=reserved-release" in output.read_text()
+
+
+@pytest.mark.parametrize(
+    "draft, tag_target, latest, expected",
+    [
+        (False, None, "1.3.2", "1.3.3"),
+        (True, "old", "1.3.2", "1.3.4"),
+        (True, None, "1.3.2", "1.3.4"),
+        (False, "old", "1.3.2", "1.3.4"),
+        (False, "annotated-old", "1.3.2", "1.3.4"),
+        (False, "current", "1.3.2", "1.3.3"),
+        (False, "annotated-current", "1.3.2", "1.3.3"),
+        (True, "old", "1.3.3", "1.3.4"),
+    ],
+)
+def test_workflow_selects_current_release_around_abandoned_versions(
+    tmp_path, draft, tag_target, latest, expected
+):
+    old = "b" * 40
+    write_json(tmp_path / "pypi.json", {"info": {"version": latest}})
+    write_json(tmp_path / "associated-pulls.json", [])
+    write_json(
+        tmp_path / "releases.json",
+        [
+            {
+                "tag_name": "v1.3.3",
+                "target_commitish": old,
+                "draft": True,
+                "body": f"Release-Source-SHA: {old}\nPackage-Version: 1.3.3",
+            }
+        ]
+        if draft
+        else [],
+    )
+    tags = ""
+    if tag_target:
+        target = SOURCE_SHA if tag_target.endswith("current") else old
+        if tag_target.startswith("annotated"):
+            tags = f"{'d' * 40}\trefs/tags/v1.3.3\n{target}\trefs/tags/v1.3.3^{{}}\n"
+        else:
+            tags = f"{target}\trefs/tags/v1.3.3\n"
+    (tmp_path / "tag-refs.txt").write_text(tags)
+    (tmp_path / "commit-message.txt").write_text("ordinary change")
+    (tmp_path / "gh-output").touch()
+    choose = workflow_step(
+        "prepare", "Select release version from exact PR association"
+    )
+    result, _ = run_workflow_step(f"export DEFAULT_BRANCH=main\n{choose}", tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "gh-output").read_text().splitlines() == [
+        f"version={expected}",
+        "part=patch",
+        "skip=false",
+    ]
 
 
 def test_pypi_artifact_cli_simulates_publish_retry_failure_and_conflict(tmp_path):
