@@ -7,6 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 from tests.test_release_artifacts import SOURCE_SHA, VERSION, artifact_pair
@@ -72,111 +73,7 @@ def install_fake_gh(tmp_path: Path) -> Path:
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
     executable = bindir / "gh"
-    executable.write_text(
-        """#!/usr/bin/env python3
-import json, os, shutil, sys
-from pathlib import Path
-
-state_path=Path(os.environ['MOCK_GH_STATE'])
-state=json.loads(state_path.read_text()) if state_path.exists() else {
-  'tag_sha': None, 'release': None, 'assets': {}, 'create_count': 0, 'upload_count': 0,
-  'api_endpoints': [],
-  'patch_fails': False
-}
-args=sys.argv[1:]
-def save(): state_path.write_text(json.dumps(state))
-def response(status, value, included):
-  body=json.dumps(value)
-  if included:
-    reason={200:'OK',201:'Created',404:'Not Found',500:'Server Error'}.get(
-      status,'Error')
-    print(
-      f'HTTP/2.0 {status} {reason}\\r\\n'
-      'Content-Type: application/json\\r\\n'
-      f'\\r\\n{body}')
-  else:
-    print(body)
-  return 0 if 200 <= status < 300 else 1
-
-if not args:
-  sys.exit(2)
-if args[0]=='api':
-  included='--include' in args
-  method='GET'
-  if '--method' in args: method=args[args.index('--method')+1]
-  endpoint=next((arg for arg in args if arg.startswith('repos/')), '')
-  state.setdefault('api_endpoints', []).append(endpoint)
-  save()
-  if method=='PATCH' and '/releases/' in endpoint:
-    if state.get('patch_fails'):
-      response(500, {'message':'simulated update failure'}, included)
-      sys.exit(1)
-    if state.get('release'): state['release']['draft']=False
-    save(); sys.exit(response(200, state.get('release') or {}, included))
-  if method=='POST' and endpoint.endswith('/releases/generate-notes'):
-    sys.exit(response(200, {'body':'Generated notes'}, included))
-  if '/git/ref/tags/' in endpoint:
-    if state.get('tag_lookup_status'):
-      status=state['tag_lookup_status']
-      sys.exit(response(status, {'message':'simulated tag lookup error'}, included))
-    if state.get('tag_sha'):
-      object_type=state.get('tag_object_type', 'commit')
-      object_sha='d'*40 if object_type == 'tag' else state['tag_sha']
-      ref={'ref':'refs/'+endpoint.split('/git/ref/',1)[1],
-        'object':{'sha':object_sha,'type':object_type}}
-      sys.exit(response(200, ref, included))
-    sys.exit(response(404, {'message':'Not Found'}, included))
-  if '/git/tags/' in endpoint:
-    tag_sha=endpoint.rsplit('/',1)[1]
-    if tag_sha != 'd'*40 or not state.get('tag_sha'):
-      sys.exit(response(404, {'message':'Not Found'}, included))
-    value={'object':{'sha':state['tag_sha'],'type':'commit'}}
-    sys.exit(response(200, value, included))
-  if '/releases/tags/' in endpoint:
-    if state.get('release'):
-      sys.exit(response(200, state['release'], included))
-    sys.exit(response(404, {'message':'Not Found'}, included))
-  if endpoint.endswith('/assets'):
-    sys.exit(response(200, [{'name':name} for name in state['assets']], included))
-  print('unexpected gh api endpoint: '+endpoint, file=sys.stderr); sys.exit(2)
-if args[0]=='release' and len(args)>1 and args[1]=='create':
-  tag=args[2]
-  if state.get('release'):
-    print('release already exists', file=sys.stderr); sys.exit(1)
-  notes=Path(args[args.index('--notes-file')+1]).read_text()
-  state['tag_sha']=os.environ['SOURCE_SHA']
-  state['tag_object_type']='commit'
-  state['release']={'id':17,'tag_name':tag,'body':notes,'draft':True}
-  state['create_count']+=1
-  asset_suffixes=('.whl','.tar.gz','release-manifest.json')
-  asset_args=[Path(arg) for arg in args if arg.endswith(asset_suffixes)]
-  if os.environ.get('MOCK_GH_PARTIAL_CREATE')=='1': asset_args=asset_args[:1]
-  store=Path(os.environ['MOCK_GH_ASSET_STORE']); store.mkdir(parents=True,exist_ok=True)
-  for path in asset_args:
-    shutil.copy2(path,store/path.name); state['assets'][path.name]=str(store/path.name)
-  save()
-  if os.environ.get('MOCK_GH_PARTIAL_CREATE')=='1':
-    print('simulated partial upload',file=sys.stderr); sys.exit(1)
-  sys.exit(0)
-if args[0]=='release' and len(args)>1 and args[1]=='upload':
-  state['upload_count']+=1
-  store=Path(os.environ['MOCK_GH_ASSET_STORE']); store.mkdir(parents=True,exist_ok=True)
-  for value in args[3:]:
-    path=Path(value)
-    if path.name in state['assets']:
-      print('asset already exists',file=sys.stderr); sys.exit(1)
-    shutil.copy2(path,store/path.name); state['assets'][path.name]=str(store/path.name)
-  save(); sys.exit(0)
-if args[0]=='release' and len(args)>1 and args[1]=='download':
-  directory=Path(args[args.index('--dir')+1])
-  directory.mkdir(parents=True,exist_ok=True)
-  if not state['assets']:
-    print('release has no assets',file=sys.stderr); sys.exit(1)
-  for name,source in state['assets'].items(): shutil.copy2(source,directory/name)
-  sys.exit(0)
-print('unexpected gh command: '+repr(args),file=sys.stderr); sys.exit(2)
-"""
-    )
+    shutil.copy2(ROOT / "tests/fake_github_cli.py", executable)
     executable.chmod(0o755)
     return bindir
 
@@ -466,7 +363,7 @@ def test_draft_release_creation_and_duplicate_retry_are_idempotent(tmp_path):
     duplicate, retried_state = run_workflow_step(script, tmp_path)
     assert duplicate.returncode == 0, duplicate.stderr
     assert retried_state["create_count"] == 1
-    assert retried_state["upload_count"] == 0
+    assert retried_state["upload_count"] == 3
     assert len(retried_state["assets"]) == 3
 
 
@@ -486,7 +383,7 @@ def test_partial_draft_creation_is_repaired_without_clobber_on_retry(tmp_path):
     resumed, complete_state = run_workflow_step(script, tmp_path)
     assert resumed.returncode == 0, resumed.stderr
     assert complete_state["create_count"] == 1
-    assert complete_state["upload_count"] == 1
+    assert complete_state["upload_count"] == 3
     assert len(complete_state["assets"]) == 3
 
 
@@ -503,6 +400,8 @@ def test_conflicting_draft_asset_is_never_overwritten(tmp_path):
         "release": {
             "id": 17,
             "tag_name": f"v{VERSION}",
+            "target_commitish": SOURCE_SHA,
+            "prerelease": False,
             "body": f"Release-Source-SHA: {SOURCE_SHA}\nPackage-Version: {VERSION}",
             "draft": True,
         },
@@ -521,11 +420,12 @@ def test_conflicting_draft_asset_is_never_overwritten(tmp_path):
     assert final_state["upload_count"] == 0
 
 
-def test_github_lookup_server_error_is_not_treated_as_missing_tag(tmp_path):
+@pytest.mark.parametrize("status", [401, 403, 422, 429, 500, 502, 503])
+def test_github_lookup_server_error_is_not_treated_as_missing_tag(tmp_path, status):
     release_fixture(tmp_path)
     state = {
         "tag_sha": None,
-        "tag_lookup_status": 422,
+        "tag_lookup_status": status,
         "release": None,
         "assets": {},
         "create_count": 0,
@@ -538,7 +438,7 @@ def test_github_lookup_server_error_is_not_treated_as_missing_tag(tmp_path):
 
     failed, final_state = run_workflow_step(script, tmp_path, state=state)
     assert failed.returncode != 0
-    assert "HTTP 422" in failed.stderr
+    assert f"HTTP {status}" in failed.stderr
     assert final_state["create_count"] == 0
 
 
@@ -556,6 +456,8 @@ def test_github_release_finalization_failure_leaves_draft_unpublished(tmp_path):
         "release": {
             "id": 17,
             "tag_name": f"v{VERSION}",
+            "target_commitish": SOURCE_SHA,
+            "prerelease": False,
             "body": f"Release-Source-SHA: {SOURCE_SHA}\nPackage-Version: {VERSION}",
             "draft": True,
         },

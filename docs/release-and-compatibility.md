@@ -12,7 +12,7 @@
 
 ## Release flow
 
-Only a completed `CI` workflow run can start `Release`. The release gate reloads the run from the GitHub Actions API and checks the repository, default branch, push event, workflow ID/name/path, completed-success conclusion, event SHA, run SHA, and current `main` SHA. A PR run, tag event, manual dispatch, failed/cancelled/missing run, stale SHA, or mismatched workflow identity fails closed. There is no manual or tag trigger in the release workflow.
+Normal automatic releases start only after a completed `CI` workflow run. The release gate reloads the run from the GitHub Actions API and checks the repository, default branch, push event, workflow ID/name/path, completed-success conclusion, event SHA, run SHA, and current `main` SHA. A PR run, tag event, failed/cancelled/missing run, stale SHA, or mismatched workflow identity cannot authorize normal publication. The only dispatch path is the fixed, maintainer-authorized `v1.3.3` OIDC handoff described in [release-recovery.md](release-recovery.md); it cannot select an arbitrary source/version or mutate GitHub release resources. Historical drafts block normal automatic version selection until explicitly reconciled.
 
 The gate passes the exact tested SHA to a build job. That job selects a version from the latest PyPI version and the single merged PR associated with that exact merge commit. `version:major` wins over `version:minor`; no label means patch. Direct main pushes without an associated PR use patch. A commit containing `[skip-version]` is intentionally ignored. Ambiguous PR associations and mismatched merge SHAs fail closed.
 
@@ -46,7 +46,7 @@ In PyPI, open the `flask-session.manager.sk` project settings and verify the Tru
 | Workflow | `.github/workflows/release.yml` |
 | Environment | blank |
 
-No PyPI API token or GitHub secret is needed. If the configured workflow or owner differs, update the PyPI Trusted Publisher entry before relying on automatic releases. The publish job obtains an OIDC token; tests, compatibility, build, and release-reservation jobs do not.
+No PyPI API token or GitHub secret is needed. If the configured workflow or owner differs, update the PyPI Trusted Publisher entry before relying on automatic releases. The normal publisher and the fixed one-time recovery publisher obtain OIDC tokens; tests, compatibility, normal build, and release-reservation jobs do not. No GitHub App or stored maintainer credential is used.
 
 ## Branch protection setup after this PR runs successfully
 
