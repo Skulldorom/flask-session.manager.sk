@@ -13,7 +13,11 @@ from scripts.resolve_tag_ref import SHA
 def select_source(api, repository, head):
     if not SHA.fullmatch(head):
         raise ValueError("invalid authorized main SHA")
-    drafts = [r for r in api.collection(f"repos/{repository}/releases") if r.get("draft") is True]
+    drafts = [
+        release
+        for release in api.collection(f"repos/{repository}/releases")
+        if release.get("draft") is True
+    ]
     if not drafts:
         return head
     if len(drafts) != 1:
@@ -22,7 +26,9 @@ def select_source(api, repository, head):
     if not SHA.fullmatch(source):
         raise ValueError("pending release target is not an immutable source SHA")
     if source != head:
-        raise ValueError("historical draft blocks automatic release; review and resolve it")
+        raise ValueError(
+            "historical draft blocks automatic release; review and resolve it"
+        )
     return head
 
 
