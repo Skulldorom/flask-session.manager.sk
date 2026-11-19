@@ -4,7 +4,12 @@ import copy
 
 import pytest
 
-from scripts.select_recovery_source import RECOVERY_PATHS, git_diff, select_source
+from scripts.select_recovery_source import (
+    RECOVERY_PATHS,
+    git_diff,
+    select_source,
+    verify_source_ci,
+)
 from tests.test_release_workflow_integration import REPOSITORY, SOURCE_SHA
 
 HEAD = "e" * 40
@@ -42,17 +47,20 @@ class Evidence:
     def request(self, endpoint):
         if "/runs?" in endpoint:
             return {"workflow_runs": [copy.deepcopy(self.run)]}
+        if "/actions/runs/" in endpoint:
+            return copy.deepcopy(self.run)
         return copy.deepcopy(self.workflow)
 
 
 def test_only_release_infrastructure_changes_allow_same_version_recovery():
     evidence = Evidence()
-    assert (
+    # Historical publication is no longer automatically selected, even if every
+    # path is release infrastructure. Its exact-source CI check remains shared.
+    with pytest.raises(ValueError, match="one-time recovery"):
         select_source(
             evidence, REPOSITORY, HEAD, git_diff=lambda *a: list(RECOVERY_PATHS)
         )
-        == SOURCE_SHA
-    )
+    assert verify_source_ci(evidence, REPOSITORY, SOURCE_SHA).source_sha == SOURCE_SHA
 
 
 @pytest.mark.parametrize(
@@ -66,7 +74,7 @@ def test_only_release_infrastructure_changes_allow_same_version_recovery():
     ],
 )
 def test_recovery_blocks_application_build_dependencies_and_unknown_changes(paths):
-    with pytest.raises(ValueError, match="application/build"):
+    with pytest.raises(ValueError, match="one-time recovery"):
         select_source(Evidence(), REPOSITORY, HEAD, git_diff=lambda *a: paths)
 
 
@@ -84,12 +92,7 @@ def test_recovery_never_substitutes_current_ci_for_original_source_ci(field, val
     evidence = Evidence()
     evidence.run[field] = value
     with pytest.raises(ValueError):
-        select_source(
-            evidence,
-            REPOSITORY,
-            HEAD,
-            git_diff=lambda *a: ["scripts/github_release.py"],
-        )
+        verify_source_ci(evidence, REPOSITORY, SOURCE_SHA)
 
 
 def test_duplicate_pending_releases_are_not_ignored():

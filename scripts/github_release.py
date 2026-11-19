@@ -210,12 +210,34 @@ class Release:
             present.add(name)
         return sorted(self.expected.keys() - present)
 
-    def run(self, *, finalize=False):
+    def verify(self, *, release_id=None, require_tag=True):
+        """Read-only reservation verification, also used by one-time recovery."""
+        self.guard()
+        tag = self.tag_commit()
+        release = self.discover()
+        if release is None or (release_id is not None and release["id"] != release_id):
+            raise ValueError("expected existing release ID not found")
+        if self.assets(release):
+            raise ValueError("existing reservation has missing assets")
+        if require_tag and tag is None:
+            raise ValueError(
+                "reservation tag is missing; maintainer reconciliation required"
+            )
+        self.guard()
+        return release, tag
+
+    def run(self, *, finalize=False, existing_id=None):
         self.guard()
         tag = self.tag_commit()
         release = self.discover()
         # Validate every existing byte BEFORE reconciling a missing tag.
         missing = self.assets(release) if release else sorted(self.expected)
+        if existing_id is not None and (
+            release is None or release["id"] != existing_id or missing
+        ):
+            raise ValueError(
+                "one-time recovery requires the complete existing draft ID"
+            )
         if finalize and (release is None or tag is None or missing):
             raise ValueError("finalization requires a complete verified reservation")
         if release and not release["draft"] and (missing or tag is None):
@@ -326,7 +348,6 @@ def main():
         os.environ["SOURCE_SHA"],
         os.environ["VERSION"],
         Path("dist"),
-        main_sha=os.environ.get("MAIN_SHA"),
     ).run(finalize=args.action == "finalize")
 
 

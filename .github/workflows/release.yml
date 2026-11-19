@@ -6,6 +6,33 @@ on:
     types: [completed]
     branches: [main]
 
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: Exact recovery repository
+        required: true
+        type: string
+      version:
+        description: Must be 1.3.3
+        required: true
+        type: string
+      source_sha:
+        description: Original immutable source SHA
+        required: true
+        type: string
+      release_id:
+        description: Must be 448693106
+        required: true
+        type: string
+      main_sha:
+        description: Current CI-tested main SHA reviewed by the maintainer
+        required: true
+        type: string
+      confirmation:
+        description: Must be publish-v1.3.3-448693106
+        required: true
+        type: string
+
 permissions:
   contents: read
 
@@ -16,6 +43,7 @@ concurrency:
 jobs:
   authorize:
     name: Authorize exact CI source
+    if: github.event_name == 'workflow_run'
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -51,7 +79,6 @@ jobs:
         id: recovery
         env:
           GH_TOKEN: ${{ github.token }}
-          RECOVERY_APP_ID: ${{ vars.RELEASE_RECOVERY_APP_ID }}
         run: python -m scripts.select_recovery_source
 
   prepare:
@@ -193,20 +220,9 @@ jobs:
         with:
           name: release-${{ needs.prepare.outputs.version }}
           path: dist
-      - name: Mint repository-scoped recovery token
-        if: needs.authorize.outputs.source_sha != needs.authorize.outputs.main_sha
-        id: recovery-token
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
-        with:
-          app-id: ${{ vars.RELEASE_RECOVERY_APP_ID }}
-          private-key: ${{ secrets.RELEASE_RECOVERY_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: ${{ github.event.repository.name }}
-          permission-contents: write
-          permission-workflows: write
       - name: Create or verify the draft release reservation
         env:
-          GH_TOKEN: ${{ steps.recovery-token.outputs.token || github.token }}
+          GH_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
           MAIN_SHA: ${{ needs.authorize.outputs.main_sha }}
           VERSION: ${{ needs.prepare.outputs.version }}
@@ -289,22 +305,70 @@ jobs:
             --artifact-state "$ARTIFACT_STATE" \
             --publish-result "$PUBLISH_RESULT" \
             --reservation-verified
-      - name: Mint repository-scoped recovery token
-        if: needs.authorize.outputs.source_sha != needs.authorize.outputs.main_sha
-        id: recovery-token
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
-        with:
-          app-id: ${{ vars.RELEASE_RECOVERY_APP_ID }}
-          private-key: ${{ secrets.RELEASE_RECOVERY_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: ${{ github.event.repository.name }}
-          permission-contents: write
-          permission-workflows: write
       - name: Verify draft assets and publish the release
         env:
-          GH_TOKEN: ${{ steps.recovery-token.outputs.token || github.token }}
+          GH_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
           MAIN_SHA: ${{ needs.authorize.outputs.main_sha }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           python -m scripts.github_release finalize
+
+  recover-v1-3-3:
+    name: Publish reconciled v1.3.3 through OIDC
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Authorize fixed historical publication
+        run: python -m scripts.release_recovery workflow-authorize
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: Skulldorom/flask-session.manager.sk
+          ref: 06b73bebaae8fa397db17a8aab2304ce3a9896f6
+          path: source
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@3259c6206f993105e3a61b142c2d97bf4b9ef83d # v7.1.0
+        with:
+          enable-cache: true
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - name: Rebuild only the original v1.3.3 source
+        working-directory: source
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 06b73bebaae8fa397db17a8aab2304ce3a9896f6
+          uv sync --frozen --dev
+          export SETUPTOOLS_SCM_PRETEND_VERSION=1.3.3
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          uv build --no-build-isolation --out-dir ../recovery-dist
+      - name: Validate original source metadata
+        run: |
+          python -m scripts.validate_release_artifacts \
+            --dist recovery-dist --source-sha 06b73bebaae8fa397db17a8aab2304ce3a9896f6 \
+            --version 1.3.3 --manifest recovery-dist/release-manifest.json
+      - name: Recheck authorization reservation and original hashes
+        id: recovery
+        run: python -m scripts.release_recovery workflow-verify
+      - name: Stage only verified packages
+        run: |
+          mkdir packages
+          cp recovery-dist/*.whl recovery-dist/*.tar.gz packages/
+      - name: Publish only the verified original files through Trusted Publishing
+        if: steps.recovery.outputs.state == 'publish'
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # release/v1
+        with:
+          packages-dir: packages
+      - name: Verify publication and report maintainer finalization
+        run: python -m scripts.release_recovery workflow-finish

@@ -1,8 +1,4 @@
-"""Authorize an interrupted release after release-infrastructure-only changes.
-
-Both the current main commit and the original package source require successful
-trusted push CI. Application/build/dependency changes make recovery fail closed.
-"""
+"""Keep normal release selection on current main; share historical CI checks."""
 
 from __future__ import annotations
 
@@ -23,6 +19,10 @@ RECOVERY_PATHS = {
     "docs/release-recovery.md",
     "scripts/github_release.py",
     "scripts/select_recovery_source.py",
+    "scripts/release_recovery.py",
+    "scripts/check_pypi_artifacts.py",
+    "tests/test_release_recovery.py",
+    "tests/fixtures/v1.3.3-artifacts.zip",
     "scripts/authorize_release_event.py",
     "scripts/parse_gh_response.py",
     "scripts/resolve_tag_ref.py",
@@ -54,29 +54,26 @@ def select_source(api, repository, head, *, git_diff):
         raise ValueError("pending release target is not an immutable source SHA")
     if source == head:
         return head
-    lines = (release.get("body") or "").splitlines()
-    if [line for line in lines if line.startswith("Release-Source-SHA:")] != [
-        f"Release-Source-SHA: {source}"
-    ]:
-        raise ValueError("pending release source metadata conflicts")
-    changed = git_diff(source, head)
-    if not changed or not set(changed) <= RECOVERY_PATHS:
-        raise ValueError(
-            "pending release cannot recover across application/build changes"
-        )
-    workflow = api.request(f"repos/{repository}/actions/workflows/ci.yml")
-    # The workflow API filters on exact source, event, and branch. Independently
-    # validate every selected run through the same policy as fresh releases.
-    evidence = api.request(
-        f"repos/{repository}/actions/workflows/{workflow['id']}/runs?head_sha={source}&event=push&branch=main&status=success&per_page=100"
+    raise ValueError(
+        "historical draft blocks automatic release; use the one-time recovery procedure"
     )
-    runs = evidence.get("workflow_runs")
-    if not isinstance(runs, list) or not runs:
-        raise ValueError("pending package source has no successful CI evidence")
-    run = runs[0]
-    authorize_release(
+
+
+def verify_source_ci(api, repository, source, *, run_id=None):
+    workflow = api.request(f"repos/{repository}/actions/workflows/ci.yml")
+    if run_id is None:
+        evidence = api.request(
+            f"repos/{repository}/actions/workflows/{workflow['id']}/runs"
+            f"?head_sha={source}&event=push&branch=main&status=success&per_page=100"
+        )
+        runs = evidence.get("workflow_runs")
+        if not isinstance(runs, list) or not runs:
+            raise ValueError("package source has no successful CI evidence")
+        run_id = runs[0]["id"]
+    run = api.request(f"repos/{repository}/actions/runs/{run_id}")
+    return authorize_release(
         event_name="workflow_run",
-        event_run_id=run["id"],
+        event_run_id=run_id,
         event_head_sha=source,
         event_repository=repository,
         repository=repository,
@@ -86,7 +83,6 @@ def select_source(api, repository, head, *, git_diff):
         repository_default_branch="main",
         current_default_sha=source,
     )
-    return source
 
 
 def git_diff(source, head):
@@ -108,12 +104,6 @@ def main():
     source = select_source(
         GitHub(), os.environ["GITHUB_REPOSITORY"], head, git_diff=git_diff
     )
-    if source != head and not os.environ.get("RECOVERY_APP_ID"):
-        raise SystemExit(
-            "Historical-source recovery requires RELEASE_RECOVERY_APP_ID and "
-            "RELEASE_RECOVERY_APP_PRIVATE_KEY (repository-scoped App: Contents "
-            "and Workflows write). No release resources have been changed."
-        )
     with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
         output.write(f"source_sha={source}\nmain_sha={head}\n")
     print(f"Authorized package source {source}; current CI-tested main {head}")

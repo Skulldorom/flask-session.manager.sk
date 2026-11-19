@@ -28,7 +28,9 @@ state = (
     }
 )
 args = sys.argv[1:]
-endpoint = next(arg for arg in args if arg.startswith(("repos/", "https://")))
+endpoint = next(
+    arg for arg in args if arg.startswith(("repos/", "https://")) or arg == "user"
+)
 method = args[args.index("--method") + 1] if "--method" in args else "GET"
 included = "--include" in args
 url = urlsplit(endpoint)
@@ -55,6 +57,42 @@ def respond(status, value):
 
 
 save()
+if path == "user":
+    respond(200, {"login": "maintainer", "type": "User"})
+if "/collaborators/" in path:
+    login = path.split("/collaborators/")[1].split("/")[0]
+    respond(
+        200,
+        {
+            "permission": "admin",
+            "role_name": state.get("role_name", "admin"),
+            "user": {"login": login},
+        },
+    )
+if "/actions/workflows/" in path:
+    if path.endswith("/runs"):
+        respond(200, {"workflow_runs": [{"id": 100}]})
+    respond(200, {"id": 327914495, "name": "CI", "path": ".github/workflows/ci.yml"})
+if "/actions/runs/" in path:
+    source = (
+        os.environ["SOURCE_SHA"] if path.endswith("/44095831330") else state["main_sha"]
+    )
+    respond(
+        200,
+        {
+            "id": int(path.rsplit("/", 1)[1]),
+            "head_sha": source,
+            "head_branch": "main",
+            "repository": {"full_name": os.environ["GITHUB_REPOSITORY"]},
+            "head_repository": {"full_name": os.environ["GITHUB_REPOSITORY"]},
+            "workflow_id": 327914495,
+            "name": "CI",
+            "path": ".github/workflows/ci.yml",
+            "event": "push",
+            "status": "completed",
+            "conclusion": state.get("ci_conclusion", "success"),
+        },
+    )
 if "/git/ref/heads/" in path:
     respond(
         200,
