@@ -18,6 +18,9 @@ from tests.test_github_release import ContractAPI
 from tests.test_release_workflow_integration import ROOT, install_fake_gh, workflow_step
 
 HEAD = "e" * 40
+# The main commit that introduced the recovery workflow contained only
+# recovery-eligible changes from the original v1.3.3 source.
+RECOVERY_ELIGIBLE_MAIN = "63f42ea6475ece56cd1f4406429a804629b1ac65"
 
 
 def draft():
@@ -334,16 +337,13 @@ def test_real_cli_and_yaml_handoff_use_original_bytes_without_github_writes(
     subprocess.run(
         ["git", "clone", "--shared", "--quiet", str(ROOT), str(workspace)], check=True
     )
-    head = subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=workspace, text=True
-    ).strip()
     remote = tmp_path / "remote"
     shutil.copytree(original_dist, remote)
     shutil.copytree(original_dist, workspace / "recovery-dist")
     (workspace / "recovery-dist/release-manifest.json").unlink()
     state_file = tmp_path / "state.json"
     state = {
-        "main_sha": head,
+        "main_sha": RECOVERY_ELIGIBLE_MAIN,
         "tag_sha": recovery.SOURCE,
         "release": draft(),
         "assets": {p.name: str(p) for p in remote.iterdir()},
@@ -370,7 +370,7 @@ else:
 """
     )
     python.chmod(0o755)
-    event, context = request_event(head)
+    event, context = request_event(RECOVERY_ELIGIBLE_MAIN)
     event_path = tmp_path / "event.json"
     event_path.write_text(json.dumps(event))
     pypi = tmp_path / "pypi.json"
