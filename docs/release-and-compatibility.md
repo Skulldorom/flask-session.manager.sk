@@ -2,7 +2,7 @@
 
 ## Current release state (audited 17 November 2026)
 
-- The default branch is `main`, currently at `7f20858f6b38299de3e0c6ac75433c9cc929052b`.
+- The default branch is `main`; verify the current SHA rather than relying on this historical audit snapshot.
 - The latest published GitHub Release and PyPI version are `v1.3.2` / `1.3.2`.
 - The prior `Release` workflow accepted arbitrary `v*.*.*` tag pushes and could build/publish them without CI evidence. Its automatic path also reset a previously tested SHA to the then-current `main`, and pushed the version commit/tag before it built the package.
 - Before this change, Flask had two publishing entry points: `workflow_run` after `CI` completed and `workflow_dispatch` with a selected version part; the tag-triggered `publish-existing-tag` job was a third bypass. The automatic job used `GITHUB_TOKEN` with repository write permission to push a version commit and tag, then PyPI OIDC to upload, then `GITHUB_TOKEN` to create a GitHub Release. The tag job also used PyPI OIDC and accepted any matching tag. Both used `skip-existing: true`.
@@ -12,7 +12,7 @@
 
 ## Release flow
 
-Normal automatic releases start only after a completed `CI` workflow run. The release gate reloads the run from the GitHub Actions API and checks the repository, default branch, push event, workflow ID/name/path, completed-success conclusion, event SHA, run SHA, and current `main` SHA. A PR run, tag event, failed/cancelled/missing run, stale SHA, or mismatched workflow identity cannot authorize normal publication. The only dispatch path is the fixed, maintainer-authorized `v1.3.3` OIDC handoff described in [release-recovery.md](release-recovery.md); it cannot select an arbitrary source/version or mutate GitHub release resources. Historical drafts block normal automatic version selection until explicitly reconciled.
+Normal automatic releases start only after a completed `CI` workflow run. The release gate reloads the run from the GitHub Actions API and checks the repository, default branch, push event, workflow ID/name/path, completed-success conclusion, event SHA, run SHA, and current `main` SHA. A PR run, tag event, failed/cancelled/missing run, stale SHA, or mismatched workflow identity cannot authorize normal publication. No manual-dispatch publisher exists. A historical draft blocks normal automatic version selection until explicitly resolved; the abandoned unpublished `v1.3.3` draft was deleted so fresh current-main releases may reuse `1.3.3` if PyPI does not already contain it.
 
 The gate passes the exact tested SHA to a build job. That job selects a version from the latest PyPI version and the single merged PR associated with that exact merge commit. `version:major` wins over `version:minor`; no label means patch. Direct main pushes without an associated PR use patch. A commit containing `[skip-version]` is intentionally ignored. Ambiguous PR associations and mismatched merge SHAs fail closed.
 
@@ -46,7 +46,7 @@ In PyPI, open the `flask-session.manager.sk` project settings and verify the Tru
 | Workflow | `.github/workflows/release.yml` |
 | Environment | blank |
 
-No PyPI API token or GitHub secret is needed. If the configured workflow or owner differs, update the PyPI Trusted Publisher entry before relying on automatic releases. The normal publisher and the fixed one-time recovery publisher obtain OIDC tokens; tests, compatibility, normal build, and release-reservation jobs do not. No GitHub App or stored maintainer credential is used.
+No PyPI API token or GitHub secret is needed. If the configured workflow or owner differs, update the PyPI Trusted Publisher entry before relying on automatic releases. Only the normal publisher obtains OIDC tokens; tests, compatibility, build, and release-reservation jobs do not. No GitHub App or stored maintainer credential is used.
 
 ## Branch protection setup after this PR runs successfully
 
